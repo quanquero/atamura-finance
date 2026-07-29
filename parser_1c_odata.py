@@ -42,7 +42,9 @@ def fetch_all(entity, filter_=None):
         parts = ["$format=json", "$top=1000", f"$skip={skip}"]
         if filter_:
             parts.append("$filter=" + urllib.parse.quote(filter_, safe="'"))
-        data = _req(f"{entity}?".join([BASE + "/", "&".join(parts)])).get("value", [])
+        # имя сущности кириллицей (Catalog_Контрагенты) → URL-кодируем, иначе HTTP-строка падает на ASCII
+        url = BASE + "/" + urllib.parse.quote(entity) + "?" + "&".join(parts)
+        data = _req(url).get("value", [])
         out += data
         if len(data) < 1000:
             return out
