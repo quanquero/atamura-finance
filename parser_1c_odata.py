@@ -1,20 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-Парсер 1С OData -> SQLite. Пилот финблока (база 21_Silver_Development).
-Тянет контрагентов (БИН) + исходящие оплаты, джойнит по БИН, ищет дубли.
-Только стандартная библиотека Python 3 — ставить ничего не надо.
+Парсер 1С OData -> SQLite. Финблок ATAMŪRA.
+Полный срез: контрагенты(БИН) + исходящие/входящие оплаты + поступление(АВР) →
+дедуп оплат поставщикам, «три ноги» (выполнено vs выплачено), БДДС (приток/отток).
+Только стандартная библиотека Python 3.
 
-Настрой 3 строки ниже (BASE / USER / PASS) и запусти:
+Настрой .env РЯДОМ со скриптом (см. .env.example), потом:
     python parser_1c_odata.py
 """
-import base64, json, sqlite3, sys, urllib.request, urllib.parse
+import base64, json, os, sqlite3, sys, urllib.request, urllib.parse
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-# ==================== НАСТРОЙКИ ====================
-# Секреты (BASE / USER / PASS) — в файле .env РЯДОМ со скриптом. .env в git НЕ коммитим (см. .gitignore).
-# Заведи .env по образцу .env.example. Так пароль не попадёт в GitHub.
-import os
+# ==================== НАСТРОЙКИ (.env) ====================
+# Секреты (BASE / USER / PASS) — в .env рядом со скриптом, в git НЕ коммитим.
 def _load_env():
     cfg = {}
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -28,18 +27,26 @@ def _load_env():
         pass
     return cfg
 _ENV = _load_env()
-
 BASE   = _ENV.get("BASE", "http://localhost/21_Silver_Development/odata/standard.odata")
-USER   = _ENV.get("USER", "")     # 1С-логин из .env. Пусто = без авторизации.
+USER   = _ENV.get("USER", "")
 PASS   = _ENV.get("PASS", "")
 MONTHS = int(_ENV.get("MONTHS", "1") or "1")
 DB     = "finance_1c.sqlite3"
-# ==================================================
+# =========================================================
 
-PAY_DOCS = [   # документы исходящих платежей в этой конфигурации
+OUT_DOCS = [   # исходящие (отток)
     "Document_ПлатежноеПоручениеИсходящее",
     "Document_ПлатежныйОрдерСписаниеДенежныхСредств",
     "Document_РасходныйКассовыйОрдер",
+]
+IN_DOCS = [    # входящие (приток)
+    "Document_ПлатежноеПоручениеВходящее",
+    "Document_ПлатежныйОрдерПоступлениеДенежныхСредств",
+    "Document_ПриходныйКассовыйОрдер",
+    "Document_ОплатаОтПокупателяПлатежнойКартой",
+]
+RECEIPT_DOCS = [  # выполнено / АВР (принято работ и товаров)
+    "Document_ПоступлениеТоваровУслуг",
 ]
 
 def _req(url):
@@ -47,7 +54,7 @@ def _req(url):
     if USER:
         r.add_header("Authorization", "Basic " + base64.b64encode(f"{USER}:{PASS}".encode()).decode())
     r.add_header("Accept", "application/json")
-    with urllib.request.urlopen(r, timeout=90) as resp:
+    with urllib.request.urlopen(r, timeout=120) as resp:
         return json.load(resp)
 
 def fetch_all(entity, filter_=None):
@@ -57,7 +64,7 @@ def fetch_all(entity, filter_=None):
         parts = ["$format=json", "$top=1000", f"$skip={skip}"]
         if filter_:
             parts.append("$filter=" + urllib.parse.quote(filter_, safe="'"))
-        # имя сущности кириллицей (Catalog_Контрагенты) → URL-кодируем, иначе HTTP-строка падает на ASCII
+        # имя сущности кириллицей → URL-кодируем, иначе HTTP-строка падает на ASCII
         url = BASE + "/" + urllib.parse.quote(entity) + "?" + "&".join(parts)
         data = _req(url).get("value", [])
         out += data
@@ -75,8 +82,32 @@ def pick(rec, names):
 def money(n):
     return f"{n:,.0f}".replace(",", " ")
 
+def pull(docs, since, kind):
+    """Тянет и нормализует документы одного денежного потока (out/in/receipt)."""
+    rows = []
+    for doc in docs:
+        try:
+            recs = fetch_all(doc, f"Date ge datetime'{since}' and DeletionMark eq false")
+        except Exception as e:
+            print(f"    {doc}: пропуск ({e})"); continue
+        print(f"    {doc}: {len(recs)}")
+        for r in recs:
+            amount = pick(r, ["СуммаДокумента", "Сумма"])
+            if amount is None:
+                continue
+            rows.append({
+                "doc": doc.replace("Document_", ""),
+                "kind": kind,
+                "number": r.get("Number", ""),
+                "date": str(pick(r, ["Date", "Дата"]) or "")[:10],
+                "cref": pick(r, ["Контрагент_Key", "Получатель_Key", "Плательщик_Key", "Контрагент"]),
+                "amount": float(amount),
+                "vidop": r.get("ВидОперации", "") or "",
+                "purpose": pick(r, ["НазначениеПлатежа", "Комментарий"]) or "",
+            })
+    return rows
+
 def main():
-    # 1) Контрагенты -> карта Ref_Key -> (БИН, имя, тип)
     print("Тяну контрагентов…")
     conts = fetch_all("Catalog_Контрагенты", "IsFolder eq false and DeletionMark eq false")
     cmap = {}
@@ -84,76 +115,106 @@ def main():
         cmap[c["Ref_Key"]] = {
             "bin":  (pick(c, ["ИдентификационныйКодЛичности", "РНН"]) or "").strip(),
             "name": c.get("Description", ""),
-            "type": c.get("ЮрФизЛицо", ""),
         }
     print(f"  контрагентов: {len(cmap)}")
 
-    # 2) Оплаты за последние MONTHS месяцев
     since = (datetime.now() - timedelta(days=30 * MONTHS)).strftime("%Y-%m-%dT00:00:00")
-    payments = []
-    for doc in PAY_DOCS:
-        print(f"Тяну {doc}…")
-        try:
-            recs = fetch_all(doc, f"Date ge datetime'{since}' and DeletionMark eq false")
-        except Exception as e:
-            print(f"  пропуск ({e})"); continue
-        print(f"  записей: {len(recs)}")
-        if recs:
-            print("  поля первой записи:", ", ".join(list(recs[0].keys())[:45]))
-        for r in recs:
-            cref   = pick(r, ["Контрагент_Key", "Получатель_Key", "Контрагент"])
-            amount = pick(r, ["СуммаДокумента", "Сумма"])
-            date   = pick(r, ["Date", "Дата"])
-            if amount is None or cref is None:
-                continue
-            info = cmap.get(cref, {})
-            payments.append({
-                "doc": doc.replace("Document_", ""),
-                "number": r.get("Number", ""),
-                "date": str(date or "")[:10],
-                "bin": info.get("bin", ""),
-                "name": info.get("name", "") or "(нет в справочнике)",
-                "amount": float(amount),
-                "purpose": pick(r, ["НазначениеПлатежа", "Комментарий"]) or "",
-                "posted": 1 if r.get("Posted") else 0,
-            })
-    total = sum(p["amount"] for p in payments)
-    print(f"\nВсего оплат за {MONTHS} мес: {len(payments)} на сумму {money(total)} ₸")
+    print("Тяну ИСХОДЯЩИЕ (отток)…");           out_pay  = pull(OUT_DOCS, since, "out")
+    print("Тяну ВХОДЯЩИЕ (приток)…");           in_pay   = pull(IN_DOCS, since, "in")
+    print("Тяну ПОСТУПЛЕНИЕ (выполнено/АВР)…"); receipts = pull(RECEIPT_DOCS, since, "receipt")
 
-    # 3) В SQLite
+    # обогащаем именем/БИН из справочника + тег «поставщику» на исходящих
+    for rows in (out_pay, in_pay, receipts):
+        for p in rows:
+            info = cmap.get(p["cref"], {})
+            p["bin"]  = info.get("bin", "")
+            p["name"] = info.get("name", "") or "(нет в справочнике)"
+    for p in out_pay:
+        p["supplier"] = "поставщик" in (p["vidop"] or "").lower()
+
+    out_total  = sum(p["amount"] for p in out_pay)
+    sup        = [p for p in out_pay if p["supplier"]]
+    sup_total  = sum(p["amount"] for p in sup)
+    in_total   = sum(p["amount"] for p in in_pay)
+    done_total = sum(p["amount"] for p in receipts)
+
+    # ---- СВОДКА (БДДС) ----
+    print(f"\n===== СВОДКА (за {MONTHS} мес) =====")
+    print(f"  Контрагентов (БИН):            {len(cmap)}")
+    print(f"  Исходящие (отток):             {money(out_total):>16} ₸   из них поставщикам: {money(sup_total)} ({len(sup)} плат.)")
+    print(f"  Входящие (приток):             {money(in_total):>16} ₸")
+    print(f"  Выполнено (поступление/АВР):   {money(done_total):>16} ₸")
+    print(f"  Операц. сальдо (приток−отток): {money(in_total - out_total):>16} ₸")
+
+    # диагностика: виды операций в исходящих (чтобы точно настроить фильтр «поставщику»)
+    vk = defaultdict(float)
+    for p in out_pay:
+        vk[p["vidop"] or "(пусто)"] += p["amount"]
+    print("  ---- виды операций в исходящих (топ) ----")
+    for v, s in sorted(vk.items(), key=lambda x: -x[1])[:8]:
+        print(f"    {money(s):>14} ₸  {v}")
+
+    # ---- SQLite ----
     con = sqlite3.connect(DB)
-    con.execute("""CREATE TABLE IF NOT EXISTS payment(
-        doc TEXT, number TEXT, date TEXT, bin TEXT, name TEXT, amount REAL, purpose TEXT, posted INT)""")
-    con.execute("DELETE FROM payment")
-    con.executemany("INSERT INTO payment VALUES(?,?,?,?,?,?,?,?)",
-        [(p["doc"], p["number"], p["date"], p["bin"], p["name"], p["amount"], p["purpose"], p["posted"]) for p in payments])
+    con.execute("""CREATE TABLE IF NOT EXISTS flow(
+        kind TEXT, doc TEXT, number TEXT, date TEXT, bin TEXT, name TEXT,
+        amount REAL, vidop TEXT, supplier INT, purpose TEXT)""")
+    con.execute("DELETE FROM flow")
+    rows = []
+    for p in out_pay:
+        rows.append(("out", p["doc"], p["number"], p["date"], p["bin"], p["name"], p["amount"], p["vidop"], 1 if p.get("supplier") else 0, p["purpose"]))
+    for p in in_pay:
+        rows.append(("in", p["doc"], p["number"], p["date"], p["bin"], p["name"], p["amount"], p["vidop"], 0, p["purpose"]))
+    for p in receipts:
+        rows.append(("receipt", p["doc"], p["number"], p["date"], p["bin"], p["name"], p["amount"], p["vidop"], 0, p["purpose"]))
+    con.executemany("INSERT INTO flow VALUES(?,?,?,?,?,?,?,?,?,?)", rows)
     con.commit(); con.close()
 
-    # 4) Дубли: тот же БИН + сумма + дата (то, что Шерлок ловит)
+    # ---- ДУБЛИ по оплатам ПОСТАВЩИКАМ (Шерлок) ----
     groups = defaultdict(list)
-    for p in payments:
+    for p in sup:
         if p["bin"]:
             groups[(p["bin"], round(p["amount"], 2), p["date"])].append(p)
     dubs = {k: v for k, v in groups.items() if len(v) > 1}
-    print(f"\n=== КАНДИДАТЫ В ДУБЛИ: {len(dubs)} ===")
+    print(f"\n===== КАНДИДАТЫ В ДУБЛИ (оплаты поставщикам): {len(dubs)} =====")
     for (bin_, amt, date), items in sorted(dubs.items(), key=lambda x: -x[0][1]):
         nums = ", ".join(str(i["number"]) for i in items)
-        print(f"  🔴 {items[0]['name']} · {money(amt)} ₸ · {date} · платежей {len(items)} (№ {nums})")
+        print(f"  🔴 {items[0]['name'][:28]:28} {money(amt):>13} ₸ · {date} · платежей {len(items)} (№ {nums})")
+    if not dubs:
+        print("  чисто — задвоений среди оплат поставщикам не найдено")
 
-    # 5) Топ по контрагенту
-    tot = defaultdict(float)
-    for p in payments:
-        tot[p["name"]] += p["amount"]
-    print("\n=== ТОП-10 ПО ОПЛАТЕ ===")
-    for name, s in sorted(tot.items(), key=lambda x: -x[1])[:10]:
-        print(f"  {money(s):>16} ₸  {name}")
+    # ---- ТРИ НОГИ: выполнено (АВР) vs выплачено — Накопитель без договора ----
+    byc = defaultdict(lambda: {"done": 0.0, "paid": 0.0, "name": ""})
+    for p in sup:
+        if p["bin"]:
+            byc[p["bin"]]["paid"] += p["amount"]; byc[p["bin"]]["name"] = p["name"]
+    for p in receipts:
+        if p["bin"]:
+            byc[p["bin"]]["done"] += p["amount"]
+            if not byc[p["bin"]]["name"]:
+                byc[p["bin"]]["name"] = p["name"]
+    three = sorted(((abs(d["done"] - d["paid"]), d["name"], d["done"], d["paid"], d["done"] - d["paid"])
+                    for d in byc.values()), reverse=True)
+    print("\n===== ТРИ НОГИ — выполнено vs выплачено (топ расхождений) =====")
+    for _, name, done, paid, diff in three[:12]:
+        flag = "🔴 переплата" if diff < -1 else ("🟡 долг подрядчику" if diff > 1 else "🟢 сошлось")
+        print(f"  {name[:26]:26} вып {money(done):>13}  опл {money(paid):>13}  Δ {money(diff):>13}  {flag}")
 
-    print(f"\nГотово. Данные в {DB} (таблица payment).")
+    # ---- ТОП поставщиков по оплате ----
+    tot, nm = defaultdict(float), {}
+    for p in sup:
+        key = p["bin"] or p["name"]
+        tot[key] += p["amount"]; nm[key] = p["name"]
+    print("\n===== ТОП-10 ПОСТАВЩИКОВ (по оплате) =====")
+    for key, s in sorted(tot.items(), key=lambda x: -x[1])[:10]:
+        print(f"  {money(s):>16} ₸  {nm[key]}")
+
+    print(f"\nГотово. Данные в {DB} (таблица flow: out / in / receipt).")
 
 if __name__ == "__main__":
     try:
         main()
     except urllib.error.HTTPError as e:
-        print(f"HTTP {e.code}: {e.reason}. Если 401 — нужен логин/пароль 1С (впиши USER/PASS вверху).")
+        print(f"HTTP {e.code}: {e.reason}. Если 401 — проверь USER/PASS в .env.")
     except Exception as e:
         print(f"Ошибка: {e}")
