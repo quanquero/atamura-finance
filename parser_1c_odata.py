@@ -17,7 +17,7 @@ from collections import defaultdict
 BASE = "http://localhost/21_Silver_Development/odata/standard.odata"
 USER = ""          # 1С-пользователь (если OData попросит логин при заходе браузером — впиши). Пусто = без авторизации.
 PASS = ""
-MONTHS = 3         # за сколько последних месяцев тянуть оплаты
+MONTHS = 1         # за сколько последних месяцев тянуть оплаты
 DB    = "finance_1c.sqlite3"
 # ==================================================
 
