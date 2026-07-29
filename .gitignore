@@ -1,0 +1,26 @@
+# --- СЕКРЕТЫ (никогда в git) ---
+.env
+*.env
+*.env.txt
+
+# --- рантайм / данные (реальные финданные не коммитим) ---
+*.sqlite3
+*.db
+data/
+out/
+logs/
+*.xlsx
+*.xls
+
+# --- окружение ---
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.claude/
+
+# --- 1С бинарники / мусор ---
+*.epf
+*.erf
+*Zone.Identifier
