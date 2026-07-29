@@ -12,13 +12,28 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 # ==================== НАСТРОЙКИ ====================
-# Если запускаешь НА сервере 1С — оставь localhost.
-# Если с другого компа в той же сети — поставь http://192.168.0.200/21_Silver_Development/odata/standard.odata
-BASE = "http://localhost/21_Silver_Development/odata/standard.odata"
-USER = ""          # 1С-пользователь (если OData попросит логин при заходе браузером — впиши). Пусто = без авторизации.
-PASS = ""
-MONTHS = 1         # за сколько последних месяцев тянуть оплаты
-DB    = "finance_1c.sqlite3"
+# Секреты (BASE / USER / PASS) — в файле .env РЯДОМ со скриптом. .env в git НЕ коммитим (см. .gitignore).
+# Заведи .env по образцу .env.example. Так пароль не попадёт в GitHub.
+import os
+def _load_env():
+    cfg = {}
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    try:
+        for line in open(p, encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return cfg
+_ENV = _load_env()
+
+BASE   = _ENV.get("BASE", "http://localhost/21_Silver_Development/odata/standard.odata")
+USER   = _ENV.get("USER", "")     # 1С-логин из .env. Пусто = без авторизации.
+PASS   = _ENV.get("PASS", "")
+MONTHS = int(_ENV.get("MONTHS", "1") or "1")
+DB     = "finance_1c.sqlite3"
 # ==================================================
 
 PAY_DOCS = [   # документы исходящих платежей в этой конфигурации
