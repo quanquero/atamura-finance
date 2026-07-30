@@ -20,7 +20,7 @@ KEY  = os.environ.get("SERVICE_KEY", "dev-finance-key")   # в проде зад
 BITRIX = os.environ.get("BITRIX_WEBHOOK", "").rstrip("/")
 BX_PORTAL = BITRIX.split("/rest/")[0] if "/rest/" in BITRIX else ""   # для ссылок на карточки заявок
 BX_ENTITY = 178
-BX_MONTHS = int(os.environ.get("BX_MONTHS", "3"))   # окно заявок шире среза 1С: платёж может ссылаться на старую/продлённую заявку
+BX_MONTHS = int(os.environ.get("BX_MONTHS", "6"))   # окно заявок шире среза 1С: платёж может ссылаться на старую/продлённую заявку
 
 
 def _db():
@@ -130,7 +130,7 @@ def reconcile():
     """Сверка: заявки Bitrix ↔ платежи поставщикам 1С по № заявки (из назначения).
     Возвращает реестр заявок со статусом, разрез по компаниям, оплаты без заявки."""
     c = _db()
-    pays = c.execute("SELECT company,name,amount,date,purpose FROM flow WHERE kind='out' AND supplier=1").fetchall()
+    pays = c.execute("SELECT company,name,amount,date,purpose,doc FROM flow WHERE kind='out' AND supplier=1").fetchall()
     zs = c.execute("SELECT id,number,company,supplier,amount,stage FROM zayavka").fetchall(); c.close()
     znums = {z[1] for z in zs if z[1]}
     # индекс поставщиков заявок: значимое слово → множество (id, №) — для фолбэка по имени
@@ -150,14 +150,19 @@ def reconcile():
         return max(score.items(), key=lambda x: x[1])[0]   # (zid, num) с макс. пересечением
 
     pay_nums, pay_no_num, pay_no_zayavka = {}, [], []
-    for company, name, amt, date, purpose in pays:
+    cash_tot, cash_n, cash_matched = 0.0, 0, 0
+    for company, name, amt, date, purpose, doc in pays:
         zn = _num_from(purpose)
+        if zn:
+            pay_nums.setdefault(zn, True)   # заявка «оплачена» и наличными, и с р/с
+        if "кассов" in (doc or "").lower():   # РКО — наличные, отдельный поток
+            cash_tot += amt; cash_n += 1
+            if zn and zn in znums: cash_matched += 1
+            continue
         if not zn:
             pay_no_num.append((company, name, amt, date))
-        else:
-            pay_nums.setdefault(zn, True)
-            if zn not in znums:
-                pay_no_zayavka.append((zn, company, name, amt, date, _cand_by_supplier(name)))
+        elif zn not in znums:
+            pay_no_zayavka.append((zn, company, name, amt, date, _cand_by_supplier(name)))
     z_list, by_company = [], defaultdict(lambda: [0, 0])   # by_company: [оплачено, всего]
     for zid, num, comp, sup, amt, stage in zs:
         m = num in pay_nums
@@ -168,7 +173,8 @@ def reconcile():
     waiting = [z for z in z_list if not z[5]]
     return {"pays": len(pays), "z_total": len(zs), "matched_n": matched_n, "z_list": z_list,
             "waiting": waiting, "pay_no_zayavka": pay_no_zayavka, "pay_no_num": pay_no_num,
-            "by_company": dict(by_company)}
+            "by_company": dict(by_company),
+            "cash_tot": cash_tot, "cash_n": cash_n, "cash_matched": cash_matched}
 
 
 def store(payload):
@@ -228,6 +234,7 @@ td a{color:#0e7490;font-weight:700;text-decoration:none}td a:hover{text-decorati
 .svh h2{margin:0}.svmeta{font-size:11px;color:#94a3b8}
 .rbtn{display:inline-block;background:#0e7490;color:#fff!important;padding:6px 13px;border-radius:8px;text-decoration:none;font-size:12px;font-weight:700}
 .rbtn:hover{background:#0c5f75}
+.cashln{font-size:12.5px;color:#78350f;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:9px 13px;margin-bottom:14px}
 """
 
 
@@ -329,6 +336,9 @@ def dashboard():
         sv2 = (f"<div class='sv g'><div class=n>{rec['matched_n']}</div><div class=l>Заявок оплачено (сматчено)</div></div>"
                f"<div class='sv r'><div class=n>{len(rec['pay_no_zayavka'])}</div><div class=l>Оплата без заявки в Bitrix</div></div>"
                f"<div class='sv y'><div class=n>{len(rec['waiting'])}</div><div class=l>Заявка ждёт оплаты (резерв)</div></div>")
+        cash_line = (f"<div class=cashln>💵 Наличные (касса, РКО): <b>{money(rec['cash_tot'])} ₸</b> · "
+                     f"{rec['cash_n']} платежей · сматчено с заявкой: {rec['cash_matched']}. "
+                     f"<span style=color:#94a3b8>Отдельный поток — в «оплата без заявки» не считаются.</span></div>")
         # реестр заявок со статусом + ссылка на карточку Bitrix
         zrows = ""
         for zid, num, comp, sup, amt, m in sorted(rec['z_list'], key=lambda x: -(x[4] or 0))[:30]:
@@ -360,7 +370,8 @@ def dashboard():
         nz = nz or "<tr><td colspan=6 style=color:#94a3b8>нет</td></tr>"
         svedenie = (f"<div class=svh><h2>Сведение: заявки Bitrix ↔ платежи 1С</h2>"
                     f"<div class=svmeta>окно: {BX_MONTHS} мес · заявок из Bitrix: {rec['z_total']} · синхр.: {bx_sync} &nbsp; {refresh_btn}</div></div>"
-                    f"<div class=svet style='margin-bottom:14px'>{sv2}</div>"
+                    f"<div class=svet style='margin-bottom:10px'>{sv2}</div>"
+                    f"{cash_line}"
                     f"<div class=card><table><thead><tr><th>Заявка</th><th>Компания</th><th>Поставщик</th><th class=num>Сумма</th><th>Статус</th></tr></thead>"
                     f"<tbody>{zrows}</tbody></table>"
                     f"<div class=note>Клик по № открывает карточку в Bitrix. Показаны 30 из {rec['z_total']} — остальное проверяй в Bitrix напрямую по ссылке.</div></div>"
