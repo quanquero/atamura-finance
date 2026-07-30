@@ -24,3 +24,6 @@ __pycache__/
 *.epf
 *.erf
 *Zone.Identifier
+
+# список баз с кредами — не коммитим
+bases.json

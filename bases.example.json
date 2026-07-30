@@ -1,0 +1,17 @@
+{
+  "months": 1,
+  "bases": [
+    {
+      "company": "Silver Development",
+      "base": "http://localhost/21_Silver_Development/odata/standard.odata",
+      "user": "svd",
+      "pass": "ЗАПОЛНИ_ПАРОЛЬ"
+    },
+    {
+      "company": "Element Stroy Group",
+      "base": "http://localhost/11_Element_Stroy_Group/odata/standard.odata",
+      "user": "svd",
+      "pass": "ЗАПОЛНИ_ПАРОЛЬ"
+    }
+  ]
+}
