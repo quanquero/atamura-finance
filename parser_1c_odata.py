@@ -95,6 +95,12 @@ def pull(docs, since, kind):
             amount = pick(r, ["СуммаДокумента", "Сумма"])
             if amount is None:
                 continue
+            # структурная ссылка на договор (в табличной части РасшифровкаПлатежа) — надёжнее текста
+            dog = ""
+            for ln in (r.get("РасшифровкаПлатежа") or []):
+                dk = ln.get("ДоговорКонтрагента_Key")
+                if dk and dk != "00000000-0000-0000-0000-000000000000":
+                    dog = dk; break
             rows.append({
                 "doc": doc.replace("Document_", ""),
                 "kind": kind,
@@ -103,7 +109,9 @@ def pull(docs, since, kind):
                 "cref": pick(r, ["Контрагент_Key", "Получатель_Key", "Плательщик_Key", "Контрагент"]),
                 "amount": float(amount),
                 "vidop": r.get("ВидОперации", "") or "",
-                "purpose": pick(r, ["НазначениеПлатежа", "Комментарий"]) or "",
+                "purpose": r.get("НазначениеПлатежа", "") or "",   # НАЗНАЧЕНИЕ платежа — тут суть/№ договора/счёт
+                "comment": r.get("Комментарий", "") or "",         # + комментарий (иногда № договора именно тут)
+                "dogovor_key": dog,                                # структурная ссылка на договор (для Накопителя)
             })
     return rows
 
@@ -158,16 +166,14 @@ def main():
     con = sqlite3.connect(DB)
     con.execute("""CREATE TABLE IF NOT EXISTS flow(
         kind TEXT, doc TEXT, number TEXT, date TEXT, bin TEXT, name TEXT,
-        amount REAL, vidop TEXT, supplier INT, purpose TEXT)""")
+        amount REAL, vidop TEXT, supplier INT, purpose TEXT, comment TEXT, dogovor_key TEXT)""")
     con.execute("DELETE FROM flow")
     rows = []
-    for p in out_pay:
-        rows.append(("out", p["doc"], p["number"], p["date"], p["bin"], p["name"], p["amount"], p["vidop"], 1 if p.get("supplier") else 0, p["purpose"]))
-    for p in in_pay:
-        rows.append(("in", p["doc"], p["number"], p["date"], p["bin"], p["name"], p["amount"], p["vidop"], 0, p["purpose"]))
-    for p in receipts:
-        rows.append(("receipt", p["doc"], p["number"], p["date"], p["bin"], p["name"], p["amount"], p["vidop"], 0, p["purpose"]))
-    con.executemany("INSERT INTO flow VALUES(?,?,?,?,?,?,?,?,?,?)", rows)
+    for kind, lst in (("out", out_pay), ("in", in_pay), ("receipt", receipts)):
+        for p in lst:
+            rows.append((kind, p["doc"], p["number"], p["date"], p["bin"], p["name"], p["amount"],
+                         p["vidop"], 1 if p.get("supplier") else 0, p["purpose"], p["comment"], p["dogovor_key"]))
+    con.executemany("INSERT INTO flow VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", rows)
     con.commit(); con.close()
 
     # ---- ДУБЛИ по оплатам ПОСТАВЩИКАМ (Шерлок) ----
@@ -195,10 +201,11 @@ def main():
                 byc[p["bin"]]["name"] = p["name"]
     three = sorted(((abs(d["done"] - d["paid"]), d["name"], d["done"], d["paid"], d["done"] - d["paid"])
                     for d in byc.values()), reverse=True)
-    print("\n===== ТРИ НОГИ — выполнено vs выплачено (топ расхождений) =====")
+    print("\n===== РАСХОЖДЕНИЯ: оплачено vs поступило (СЫРОЙ сигнал — вердикт только с договором) =====")
     for _, name, done, paid, diff in three[:12]:
-        flag = "🔴 переплата" if diff < -1 else ("🟡 долг подрядчику" if diff > 1 else "🟢 сошлось")
-        print(f"  {name[:26]:26} вып {money(done):>13}  опл {money(paid):>13}  Δ {money(diff):>13}  {flag}")
+        flag = "оплата > поступления (аванс? переплата?)" if diff < -1 else ("поступление > оплаты (акт раньше / недоплата?)" if diff > 1 else "≈ сходится")
+        print(f"  {name[:26]:26} поступ {money(done):>13}  оплач {money(paid):>13}  Δ {money(diff):>13}  ⚠ {flag}")
+    print("  (это НЕ переплата/долг по договору — без договора норму не знаем: аванс/бартер/удержания. Флаг = «проверить».)")
 
     # ---- ТОП поставщиков по оплате ----
     tot, nm = defaultdict(float), {}
