@@ -31,6 +31,10 @@ def _db():
     c.execute("CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)")
     c.execute("""CREATE TABLE IF NOT EXISTS zayavka(
         id INTEGER, number TEXT, title TEXT, supplier TEXT, amount REAL, stage TEXT, company TEXT)""")
+    # миграция: старая zayavka без company (создана прошлой версией)
+    zcols = {r[1] for r in c.execute("PRAGMA table_info(zayavka)").fetchall()}
+    if "company" not in zcols:
+        c.execute("ALTER TABLE zayavka ADD COLUMN company TEXT")
     return c
 
 
@@ -38,6 +42,29 @@ def _company_from(title):
     """Компания-плательщик из названия заявки: «№X / КОМПАНИЯ / поставщик / …»."""
     parts = [p.strip() for p in str(title or "").split("/")]
     return parts[1] if len(parts) > 1 else ""
+
+
+# Классификатор типа расхода (эвристика по ключевым словам назначения/расшифровки).
+# Порядок важен: сначала подряд (работы), потом поставка (материалы), потом услуга.
+_CAT_RULES = [
+    ("подряд",   ["подряд", "смр", "строительно-монтаж", "монтаж", "демонтаж", "устройство",
+                  "кладк", "штукатур", "заливк", "каркас", "стяжк", "кровл", "фасад",
+                  "бетонн", "земляны", "прораб", " работ", "выполнен работ"]),
+    ("поставка", ["поставк", "материал", "товар", "арматур", "бетон", "кирпич", "песок",
+                  "щебень", "цемент", "плит", "металл", "труб", "кабель", "светильник",
+                  "оборудован", "закуп", "стальн", "профнастил", "утеплител", "гсм", "запчаст"]),
+    ("услуга",   ["услуг", "обслуж", "аренд", "консультац", "экспертиз", "проектир", "надзор",
+                  "охран", "клининг", "реклам", "юридич", "аудит", "транспорт", "доставк",
+                  "связь", "подписк", "страхов", "госпошлин", "налог", "лицензи", "разработк"]),
+]
+
+
+def _category(*texts):
+    t = " ".join(str(x or "") for x in texts).lower()
+    for cat, kws in _CAT_RULES:
+        if any(k in t for k in kws):
+            return cat
+    return "прочее"
 
 
 def _bx(method, params):
@@ -177,7 +204,7 @@ td a{color:#0e7490;font-weight:700;text-decoration:none}td a:hover{text-decorati
 
 def dashboard():
     c = _db()
-    flow = c.execute("SELECT company,kind,date,bin,name,amount,vidop,supplier,number FROM flow").fetchall()
+    flow = c.execute("SELECT company,kind,date,bin,name,amount,vidop,supplier,number,purpose,comment FROM flow").fetchall()
     meta = dict(c.execute("SELECT k,v FROM meta").fetchall()); c.close()
     if not flow:
         return f"<!doctype html><meta charset=utf-8><style>{CSS}</style><div class=top><b>ATAMŪRA · Финансы</b></div><div class=wrap><p>Ядро пустое — срез ещё не пришёл. Запусти парсер с push.</p></div>"
@@ -246,6 +273,21 @@ def dashboard():
         top_bars += (f"<div class=brow><div class=hd><span class=co>{nmm[k]}</span><span class=vv>{money(s)} ₸</span></div>"
                      f"<div class=track><div class='fill fo' style='width:{w:.1f}%'></div></div></div>")
 
+    # разрез по типу расхода (услуги/поставки/подряд) — эвристика по назначению платежа
+    cats = defaultdict(float)
+    for r in sup:
+        cats[_category(r[9], r[10], r[4], r[6])] += r[5]
+    cat_tot = sum(cats.values()) or 1
+    cat_col = {"подряд": "#0e7490", "поставка": "#c2410c", "услуга": "#7c3aed", "прочее": "#94a3b8"}
+    cat_bars = ""
+    for k in ["подряд", "поставка", "услуга", "прочее"]:
+        v = cats.get(k, 0.0)
+        if v <= 0: continue
+        w = max(1, v / cat_tot * 100)
+        cat_bars += (f"<div class=brow><div class=hd><span class=co>{k}</span>"
+                     f"<span class=vv>{money(v)} ₸ · {v/cat_tot*100:.0f}%</span></div>"
+                     f"<div class=track><div class=fill style='width:{w:.1f}%;background:{cat_col[k]}'></div></div></div>")
+
     svet = (f"<div class='sv r'><div class=n>{len(dub)}</div><div class=l>Кандидаты в дубли</div></div>"
             f"<div class='sv y'><div class=n>{len(disc)}</div><div class=l>Расхождения (проверить)</div></div>"
             f"<div class='sv g'><div class=n>{len(byco)}</div><div class=l>Компаний в своде</div></div>")
@@ -304,6 +346,9 @@ def dashboard():
   <h2>Обороты по дочкам</h2>
   <div class=card><div class=bars>{bars}</div>
     <div class=lg><span class=k><span class=sw style='background:#ea580c'></span>отток</span><span class=k><span class=sw style='background:#0891b2'></span>приток</span></div></div>
+  <h2>Разрез по типу расхода</h2>
+  <div class=card><div class=bars>{cat_bars}</div>
+    <div class=note>Эвристика по назначению платежа: подряд (работы/СМР) · поставка (материалы/товар) · услуга (аренда/обслуживание/налоги). Ключевые слова можно уточнять.</div></div>
   <h2>Топ поставщиков по оплате</h2>
   <div class=card><div class=bars>{top_bars}</div></div>
   <h2>🔴 Кандидаты в дубли (оплаты поставщикам)</h2>
