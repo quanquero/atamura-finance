@@ -175,10 +175,10 @@ def main():
 
     # ---- SQLite (одно ядро, помечено компанией) ----
     con = sqlite3.connect(DB)
-    con.execute("""CREATE TABLE IF NOT EXISTS flow(
+    con.execute("DROP TABLE IF EXISTS flow")   # пересоздаём под актуальную схему (снимок за период)
+    con.execute("""CREATE TABLE flow(
         company TEXT, kind TEXT, doc TEXT, number TEXT, date TEXT, bin TEXT, name TEXT,
         amount REAL, vidop TEXT, supplier INT, purpose TEXT, comment TEXT, dogovor_key TEXT)""")
-    con.execute("DELETE FROM flow")
     rows = []
     for kind, lst in (("out", out_all), ("in", in_all), ("receipt", rec_all)):
         for p in lst:
