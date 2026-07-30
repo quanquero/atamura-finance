@@ -18,8 +18,9 @@ HOST = os.environ.get("HOST", "127.0.0.1")
 KEY  = os.environ.get("SERVICE_KEY", "dev-finance-key")   # в проде задать через env
 # Вебхук Bitrix (crm) — финсервер сам тянет Служебные записки (воронка оплат, entityTypeId 178)
 BITRIX = os.environ.get("BITRIX_WEBHOOK", "").rstrip("/")
+BX_PORTAL = BITRIX.split("/rest/")[0] if "/rest/" in BITRIX else ""   # для ссылок на карточки заявок
 BX_ENTITY = 178
-BX_MONTHS = int(os.environ.get("BX_MONTHS", "3"))   # за сколько месяцев тянуть заявки
+BX_MONTHS = int(os.environ.get("BX_MONTHS", "1"))   # окно заявок = как у 1С (крайний месяц)
 
 
 def _db():
@@ -29,8 +30,14 @@ def _db():
         amount REAL, vidop TEXT, supplier INT, purpose TEXT, comment TEXT, dogovor_key TEXT)""")
     c.execute("CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)")
     c.execute("""CREATE TABLE IF NOT EXISTS zayavka(
-        id INTEGER, number TEXT, title TEXT, supplier TEXT, amount REAL, stage TEXT)""")
+        id INTEGER, number TEXT, title TEXT, supplier TEXT, amount REAL, stage TEXT, company TEXT)""")
     return c
+
+
+def _company_from(title):
+    """Компания-плательщик из названия заявки: «№X / КОМПАНИЯ / поставщик / …»."""
+    parts = [p.strip() for p in str(title or "").split("/")]
+    return parts[1] if len(parts) > 1 else ""
 
 
 def _bx(method, params):
@@ -57,12 +64,15 @@ def sync_bitrix():
         if len(items) < 50 or len(rows) >= 6000:
             break
         start += 50
-    c = _db(); c.execute("DELETE FROM zayavka")
-    c.executemany("INSERT INTO zayavka VALUES(?,?,?,?,?,?)", [(
+    c = _db()
+    c.execute("DROP TABLE IF EXISTS zayavka")
+    c.execute("""CREATE TABLE zayavka(
+        id INTEGER, number TEXT, title TEXT, supplier TEXT, amount REAL, stage TEXT, company TEXT)""")
+    c.executemany("INSERT INTO zayavka VALUES(?,?,?,?,?,?,?)", [(
         it.get("id"),
         str(it.get("ufCrm4_1644310716") or "").strip() or _num_from(it.get("title")),
         it.get("title", ""), str(it.get("ufCrm4_1762251054209") or ""),
-        float(it.get("opportunity") or 0), it.get("stageId", ""),
+        float(it.get("opportunity") or 0), it.get("stageId", ""), _company_from(it.get("title")),
     ) for it in rows])
     c.execute("INSERT INTO meta(k,v) VALUES('bx_sync',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
               (datetime.now().strftime("%Y-%m-%d %H:%M"),))
@@ -77,26 +87,32 @@ def _num_from(s):
 
 
 def reconcile():
-    """Сверка: платежи поставщикам (1С) ↔ Служебные записки (Bitrix) по № заявки.
-    Возвращает счётчики + примеры: сматчено / оплата без заявки / заявка без оплаты."""
+    """Сверка: заявки Bitrix ↔ платежи поставщикам 1С по № заявки (из назначения).
+    Возвращает реестр заявок со статусом, разрез по компаниям, оплаты без заявки."""
     c = _db()
-    pays = c.execute("SELECT company,name,amount,date,purpose,number FROM flow WHERE kind='out' AND supplier=1").fetchall()
-    zs = c.execute("SELECT number,supplier,amount,stage,title FROM zayavka").fetchall(); c.close()
-    znums = {z[0] for z in zs if z[0]}
-    matched, no_zayavka, no_num = [], [], []
-    used = set()
-    for company, name, amt, date, purpose, num in pays:
+    pays = c.execute("SELECT company,name,amount,date,purpose FROM flow WHERE kind='out' AND supplier=1").fetchall()
+    zs = c.execute("SELECT id,number,company,supplier,amount,stage FROM zayavka").fetchall(); c.close()
+    znums = {z[1] for z in zs if z[1]}
+    pay_nums, pay_no_num, pay_no_zayavka = {}, [], []
+    for company, name, amt, date, purpose in pays:
         zn = _num_from(purpose)
         if not zn:
-            no_num.append((company, name, amt, date))
-        elif zn in znums:
-            matched.append((zn, company, name, amt)); used.add(zn)
+            pay_no_num.append((company, name, amt, date))
         else:
-            no_zayavka.append((zn, company, name, amt, date))
-    # заявки на стадии оплаты без найденного платежа
-    z_no_pay = [z for z in zs if z[0] and z[0] not in used]
-    return {"pays": len(pays), "matched": matched, "no_zayavka": no_zayavka,
-            "no_num": no_num, "z_total": len(zs), "z_no_pay": z_no_pay}
+            pay_nums.setdefault(zn, True)
+            if zn not in znums:
+                pay_no_zayavka.append((zn, company, name, amt, date))
+    z_list, by_company = [], defaultdict(lambda: [0, 0])   # by_company: [оплачено, всего]
+    for zid, num, comp, sup, amt, stage in zs:
+        m = num in pay_nums
+        z_list.append((zid, num, comp, sup, amt, m))
+        by_company[comp][1] += 1
+        if m: by_company[comp][0] += 1
+    matched_n = sum(1 for z in z_list if z[5])
+    waiting = [z for z in z_list if not z[5]]
+    return {"pays": len(pays), "z_total": len(zs), "matched_n": matched_n, "z_list": z_list,
+            "waiting": waiting, "pay_no_zayavka": pay_no_zayavka, "pay_no_num": pay_no_num,
+            "by_company": dict(by_company)}
 
 
 def store(payload):
@@ -149,7 +165,13 @@ td{padding:8px 10px;border-bottom:1px solid #eef2f7}tr:last-child td{border-bott
 .num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 .b{font-weight:700}.neg{color:#b91c1c;font-weight:700}
 .pill{font-size:10px;padding:2px 7px;border-radius:20px;font-weight:600}.pr{background:#fee2e2;color:#991b1b}.py{background:#fef3c7;color:#92400e}
+.pill.ok{background:#dcfce7;color:#166534}.pill.wait{background:#fef3c7;color:#92400e}
 .note{font-size:11.5px;color:#64748b;padding:8px 16px;background:#fcfcfd;border-top:1px solid #eef2f7}
+td a{color:#0e7490;font-weight:700;text-decoration:none}td a:hover{text-decoration:underline}
+.svh{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-top:22px}
+.svh h2{margin:0}.svmeta{font-size:11px;color:#94a3b8}
+.rbtn{display:inline-block;background:#0e7490;color:#fff!important;padding:6px 13px;border-radius:8px;text-decoration:none;font-size:12px;font-weight:700}
+.rbtn:hover{background:#0c5f75}
 """
 
 
@@ -229,18 +251,49 @@ def dashboard():
             f"<div class='sv g'><div class=n>{len(byco)}</div><div class=l>Компаний в своде</div></div>")
 
     rec = reconcile()
+    bx_sync = meta.get('bx_sync', '—')
+    refresh_btn = ("<a href='/refresh' class=rbtn "
+                   "onclick=\"this.textContent='↻ обновляю из Bitrix…'\">↻ Обновить из Bitrix</a>")
     if rec.get("z_total"):
-        sv2 = (f"<div class='sv g'><div class=n>{len(rec['matched'])}</div><div class=l>Платёж ↔ заявка</div></div>"
-               f"<div class='sv r'><div class=n>{len(rec['no_zayavka'])}</div><div class=l>Оплата без заявки</div></div>"
-               f"<div class='sv y'><div class=n>{len(rec['z_no_pay'])}</div><div class=l>Заявка без оплаты</div></div>")
-        nz = "".join(f"<tr><td>{co}</td><td>{nm}</td><td class='num neg'>{money(a)}</td><td>{d}</td><td>{zn}</td></tr>"
-                     for zn, co, nm, a, d in sorted(rec['no_zayavka'], key=lambda x: -x[3])[:12]) or "<tr><td colspan=5 style=color:#94a3b8>нет</td></tr>"
-        svedenie = (f"<h2>Сведение: платежи 1С ↔ заявки Bitrix</h2>"
+        sv2 = (f"<div class='sv g'><div class=n>{rec['matched_n']}</div><div class=l>Заявок оплачено (сматчено)</div></div>"
+               f"<div class='sv r'><div class=n>{len(rec['pay_no_zayavka'])}</div><div class=l>Оплата без заявки в Bitrix</div></div>"
+               f"<div class='sv y'><div class=n>{len(rec['waiting'])}</div><div class=l>Заявка ждёт оплаты (резерв)</div></div>")
+        # реестр заявок со статусом + ссылка на карточку Bitrix
+        zrows = ""
+        for zid, num, comp, sup, amt, m in sorted(rec['z_list'], key=lambda x: -(x[4] or 0))[:30]:
+            no = f"№{num}"
+            cell = (f"<a href='{BX_PORTAL}/crm/type/{BX_ENTITY}/details/{zid}/' target=_blank>{no}</a>"
+                    if BX_PORTAL and zid else no)
+            st = ("<span class='pill ok'>✅ оплачено</span>" if m
+                  else "<span class='pill wait'>⏳ ждёт 1С</span>")
+            zrows += (f"<tr><td>{cell}</td><td>{comp or '—'}</td><td>{sup or '—'}</td>"
+                      f"<td class=num>{money(amt)}</td><td>{st}</td></tr>")
+        # сматчено по компаниям
+        bcrows = ""
+        for co, d in sorted(rec['by_company'].items(), key=lambda x: -x[1][1]):
+            pct = (100 * d[0] / d[1]) if d[1] else 0
+            bcrows += (f"<tr><td>{co or '—'}</td><td class=num>{d[0]}</td><td class=num>{d[1]}</td>"
+                       f"<td class=num>{pct:.0f}%</td></tr>")
+        # оплата без заявки — платёж есть, № не найден среди заявок Bitrix
+        nz = "".join(f"<tr><td>{co}</td><td>{nm}</td><td class='num neg'>{money(a)}</td><td>{d}</td><td>№{zn}</td></tr>"
+                     for zn, co, nm, a, d in sorted(rec['pay_no_zayavka'], key=lambda x: -x[3])[:12]) \
+             or "<tr><td colspan=5 style=color:#94a3b8>нет</td></tr>"
+        svedenie = (f"<div class=svh><h2>Сведение: заявки Bitrix ↔ платежи 1С</h2>"
+                    f"<div class=svmeta>окно: крайний месяц · заявок из Bitrix: {rec['z_total']} · синхр.: {bx_sync} &nbsp; {refresh_btn}</div></div>"
                     f"<div class=svet style='margin-bottom:14px'>{sv2}</div>"
-                    f"<div class=card><table><thead><tr><th>Компания</th><th>Поставщик</th><th class=num>Сумма</th><th>Дата</th><th>№ заявки</th></tr></thead>"
-                    f"<tbody>{nz}</tbody></table><div class=note>«Оплата без заявки» — платёж есть, а заявки Bitrix с таким № нет. Проверить основание.</div></div>")
+                    f"<div class=card><table><thead><tr><th>Заявка</th><th>Компания</th><th>Поставщик</th><th class=num>Сумма</th><th>Статус</th></tr></thead>"
+                    f"<tbody>{zrows}</tbody></table>"
+                    f"<div class=note>Клик по № открывает карточку в Bitrix. Показаны 30 из {rec['z_total']} — остальное проверяй в Bitrix напрямую по ссылке.</div></div>"
+                    f"<h2>Сматчено по компаниям</h2>"
+                    f"<div class=card><table><thead><tr><th>Компания</th><th class=num>Оплачено</th><th class=num>Всего заявок</th><th class=num>%</th></tr></thead>"
+                    f"<tbody>{bcrows}</tbody></table><div class=note>Сколько заявок компании уже прошли оплату по 1С.</div></div>"
+                    f"<h2>🔴 Оплата без заявки в Bitrix</h2>"
+                    f"<div class=card><table><thead><tr><th>Компания</th><th>Поставщик</th><th class=num>Сумма</th><th>Дата</th><th>№ в назначении</th></tr></thead>"
+                    f"<tbody>{nz}</tbody></table>"
+                    f"<div class=note>Платёж прошёл, но № заявки не найден среди заявок Bitrix за окно. Либо № указан неверно, либо заявки правда нет — проверить основание.</div></div>")
     else:
-        svedenie = "<div class=note style='margin-top:14px'>Заявки Bitrix не подгружены — открой <b>/sync</b> один раз, чтобы включить сведение.</div>"
+        svedenie = (f"<div class=note style='margin-top:14px'>Заявки Bitrix ещё не подгружены. "
+                    f"{refresh_btn} — один раз, чтобы включить сведение.</div>")
 
     return f"""<!doctype html><html lang=ru><head><meta charset=utf-8><title>ATAMŪRA · Финансы</title><style>{CSS}</style></head><body>
 <div class=top><b>◎ ATAMŪRA · Финансы</b><div class=s>Свод по холдингу · срез: {meta.get('ts','—')} · за {meta.get('months','?')} мес</div></div>
@@ -274,6 +327,11 @@ class H(http.server.BaseHTTPRequestHandler):
         elif self.path == "/sync":
             try: self._send(json.dumps(sync_bitrix(), ensure_ascii=False), "application/json")
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
+        elif self.path == "/refresh":
+            try:
+                sync_bitrix()
+                self.send_response(303); self.send_header("Location", "/"); self.end_headers()
+            except Exception as e: self._send(f"<pre>Ошибка синхронизации: {e}</pre>", code=500)
         elif self.path == "/" or self.path.startswith("/?"):
             try: self._send(dashboard())
             except Exception as e: self._send(f"<pre>Ошибка: {e}</pre>", code=500)
