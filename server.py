@@ -20,7 +20,7 @@ KEY  = os.environ.get("SERVICE_KEY", "dev-finance-key")   # в проде зад
 BITRIX = os.environ.get("BITRIX_WEBHOOK", "").rstrip("/")
 BX_PORTAL = BITRIX.split("/rest/")[0] if "/rest/" in BITRIX else ""   # для ссылок на карточки заявок
 BX_ENTITY = 178
-BX_MONTHS = int(os.environ.get("BX_MONTHS", "1"))   # окно заявок = как у 1С (крайний месяц)
+BX_MONTHS = int(os.environ.get("BX_MONTHS", "3"))   # окно заявок шире среза 1С: платёж может ссылаться на старую/продлённую заявку
 
 
 def _db():
@@ -113,6 +113,19 @@ def _num_from(s):
     return m.group(1) if m else ""
 
 
+_ORG_WORDS = ("товарищество с ограниченной ответственностью", "тоо", "ип", "ао", "оао",
+              "зао", "физ лицо", "физлицо", "иин", "бин")
+
+
+def _sup_tokens(s):
+    """Значимые слова названия поставщика (для фолбэк-матчинга, когда № не совпал)."""
+    t = str(s or "").lower()
+    for w in _ORG_WORDS:
+        t = t.replace(w, " ")
+    t = re.sub(r"[^a-zа-я0-9]+", " ", t)
+    return {w for w in t.split() if len(w) >= 4}
+
+
 def reconcile():
     """Сверка: заявки Bitrix ↔ платежи поставщикам 1С по № заявки (из назначения).
     Возвращает реестр заявок со статусом, разрез по компаниям, оплаты без заявки."""
@@ -120,6 +133,22 @@ def reconcile():
     pays = c.execute("SELECT company,name,amount,date,purpose FROM flow WHERE kind='out' AND supplier=1").fetchall()
     zs = c.execute("SELECT id,number,company,supplier,amount,stage FROM zayavka").fetchall(); c.close()
     znums = {z[1] for z in zs if z[1]}
+    # индекс поставщиков заявок: значимое слово → множество (id, №) — для фолбэка по имени
+    z_by_tok = defaultdict(set)
+    for zid, num, comp, sup, amt, stage in zs:
+        for w in _sup_tokens(sup):
+            z_by_tok[w].add((zid, num))
+
+    def _cand_by_supplier(name):
+        """Кандидат-заявка по совпадению слов поставщика (когда № не совпал)."""
+        score = defaultdict(int)
+        for w in _sup_tokens(name):
+            for zc in z_by_tok.get(w, ()):
+                score[zc] += 1
+        if not score:
+            return None
+        return max(score.items(), key=lambda x: x[1])[0]   # (zid, num) с макс. пересечением
+
     pay_nums, pay_no_num, pay_no_zayavka = {}, [], []
     for company, name, amt, date, purpose in pays:
         zn = _num_from(purpose)
@@ -128,7 +157,7 @@ def reconcile():
         else:
             pay_nums.setdefault(zn, True)
             if zn not in znums:
-                pay_no_zayavka.append((zn, company, name, amt, date))
+                pay_no_zayavka.append((zn, company, name, amt, date, _cand_by_supplier(name)))
     z_list, by_company = [], defaultdict(lambda: [0, 0])   # by_company: [оплачено, всего]
     for zid, num, comp, sup, amt, stage in zs:
         m = num in pay_nums
@@ -316,12 +345,21 @@ def dashboard():
             pct = (100 * d[0] / d[1]) if d[1] else 0
             bcrows += (f"<tr><td>{co or '—'}</td><td class=num>{d[0]}</td><td class=num>{d[1]}</td>"
                        f"<td class=num>{pct:.0f}%</td></tr>")
-        # оплата без заявки — платёж есть, № не найден среди заявок Bitrix
-        nz = "".join(f"<tr><td>{co}</td><td>{nm}</td><td class='num neg'>{money(a)}</td><td>{d}</td><td>№{zn}</td></tr>"
-                     for zn, co, nm, a, d in sorted(rec['pay_no_zayavka'], key=lambda x: -x[3])[:12]) \
-             or "<tr><td colspan=5 style=color:#94a3b8>нет</td></tr>"
+        # оплата без заявки — платёж есть, № не найден среди заявок Bitrix; подсказываем заявку по поставщику
+        nz = ""
+        for zn, co, nm, a, d, cand in sorted(rec['pay_no_zayavka'], key=lambda x: -x[3])[:15]:
+            if cand and BX_PORTAL:
+                hint = (f"<a href='{BX_PORTAL}/crm/type/{BX_ENTITY}/details/{cand[0]}/' target=_blank>"
+                        f"№{cand[1]}</a> <span style=color:#94a3b8>(тот же поставщик — № мог быть указан неверно)</span>")
+            elif cand:
+                hint = f"№{cand[1]} (тот же поставщик)"
+            else:
+                hint = "<span style=color:#94a3b8>—</span>"
+            nz += (f"<tr><td>{co}</td><td>{nm}</td><td class='num neg'>{money(a)}</td>"
+                   f"<td>{d}</td><td>№{zn}</td><td>{hint}</td></tr>")
+        nz = nz or "<tr><td colspan=6 style=color:#94a3b8>нет</td></tr>"
         svedenie = (f"<div class=svh><h2>Сведение: заявки Bitrix ↔ платежи 1С</h2>"
-                    f"<div class=svmeta>окно: крайний месяц · заявок из Bitrix: {rec['z_total']} · синхр.: {bx_sync} &nbsp; {refresh_btn}</div></div>"
+                    f"<div class=svmeta>окно: {BX_MONTHS} мес · заявок из Bitrix: {rec['z_total']} · синхр.: {bx_sync} &nbsp; {refresh_btn}</div></div>"
                     f"<div class=svet style='margin-bottom:14px'>{sv2}</div>"
                     f"<div class=card><table><thead><tr><th>Заявка</th><th>Компания</th><th>Поставщик</th><th class=num>Сумма</th><th>Статус</th></tr></thead>"
                     f"<tbody>{zrows}</tbody></table>"
@@ -330,9 +368,9 @@ def dashboard():
                     f"<div class=card><table><thead><tr><th>Компания</th><th class=num>Оплачено</th><th class=num>Всего заявок</th><th class=num>%</th></tr></thead>"
                     f"<tbody>{bcrows}</tbody></table><div class=note>Сколько заявок компании уже прошли оплату по 1С.</div></div>"
                     f"<h2>🔴 Оплата без заявки в Bitrix</h2>"
-                    f"<div class=card><table><thead><tr><th>Компания</th><th>Поставщик</th><th class=num>Сумма</th><th>Дата</th><th>№ в назначении</th></tr></thead>"
+                    f"<div class=card><table><thead><tr><th>Компания</th><th>Поставщик</th><th class=num>Сумма</th><th>Дата</th><th>№ в назначении</th><th>Возможная заявка</th></tr></thead>"
                     f"<tbody>{nz}</tbody></table>"
-                    f"<div class=note>Платёж прошёл, но № заявки не найден среди заявок Bitrix за окно. Либо № указан неверно, либо заявки правда нет — проверить основание.</div></div>")
+                    f"<div class=note>Платёж прошёл, но № заявки не найден среди заявок Bitrix за {BX_MONTHS} мес. Если в «возможной заявке» есть кандидат по поставщику — скорее всего № указан неверно. Если пусто — заявки правда нет, проверить основание.</div></div>")
     else:
         svedenie = (f"<div class=note style='margin-top:14px'>Заявки Bitrix ещё не подгружены. "
                     f"{refresh_btn} — один раз, чтобы включить сведение.</div>")
