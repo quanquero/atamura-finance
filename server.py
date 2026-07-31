@@ -588,6 +588,37 @@ def dashboard():
 </div><div id=cftip class=cftip></div></body></html>"""
 
 
+def data_json():
+    """Все данные дашборда как JSON — основа для интерактивного клиента (вкладки/фильтры/поиск)."""
+    c = _db()
+    flow = c.execute("SELECT company,kind,date,bin,name,amount,vidop,supplier,number,purpose,comment,doc FROM flow").fetchall()
+    meta = dict(c.execute("SELECT k,v FROM meta").fetchall()); c.close()
+    rec = reconcile()
+    out = [r for r in flow if r[1] == "out"]; inp = [r for r in flow if r[1] == "in"]
+    rc = [r for r in flow if r[1] == "receipt"]; sup = [r for r in out if r[7] == 1]
+    payments = [{"company": r[0], "date": r[2], "bin": r[3], "name": r[4], "amount": r[5],
+                 "vidop": r[6], "num": _num_from(r[9]), "purpose": r[9], "doc": r[11],
+                 "cat": _category(r[9], r[10], r[4], r[6]),
+                 "cash": "кассов" in (r[11] or "").lower()} for r in sup]
+    orphans = [{"num": x[0], "company": x[1], "name": x[2], "amount": x[3], "date": x[4],
+                "cand": (x[5][1] if x[5] else None),
+                "reestr": ({"by": x[6][0], "num": x[6][1], "name": x[6][2]} if x[6] else None)}
+               for x in rec["pay_no_zayavka"]]
+    zayavki = [{"id": z[0], "num": z[1], "company": z[2], "supplier": z[3], "amount": z[4],
+                "paid": z[5], "stage": z[6]} for z in rec["z_list"]]
+    return {"meta": meta,
+            "kpi": {"out": sum(r[5] for r in out), "in": sum(r[5] for r in inp),
+                    "receipt": sum(r[5] for r in rc), "sup": sum(r[5] for r in sup)},
+            "series": _timeseries(flow), "payments": payments, "orphans": orphans, "zayavki": zayavki,
+            "by_company": rec["by_company"],
+            "counts": {"matched": rec["matched_n"], "reserve": len(rec["reserve"]),
+                       "in_progress": len(rec["in_progress"]), "rejected": len(rec["rejected"]),
+                       "nz": len(rec["pay_no_zayavka"]), "nz_in_reestr": rec["nz_in_reestr"],
+                       "nz_orphan": rec["nz_orphan"], "reestr_rows": rec["reestr_rows"],
+                       "cash_tot": rec["cash_tot"], "cash_n": rec["cash_n"]},
+            "bx_portal": BX_PORTAL, "bx_entity": BX_ENTITY}
+
+
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def _send(self, body, ctype="text/html; charset=utf-8", code=200):
@@ -604,6 +635,9 @@ class H(http.server.BaseHTTPRequestHandler):
                 sync_bitrix()
                 self.send_response(303); self.send_header("Location", "/"); self.end_headers()
             except Exception as e: self._send(f"<pre>Ошибка синхронизации: {e}</pre>", code=500)
+        elif self.path == "/data.json":
+            try: self._send(json.dumps(data_json(), ensure_ascii=False), "application/json")
+            except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path == "/" or self.path.startswith("/?"):
             try: self._send(dashboard())
             except Exception as e: self._send(f"<pre>Ошибка: {e}</pre>", code=500)
