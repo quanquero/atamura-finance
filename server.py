@@ -31,6 +31,8 @@ def _db():
     c.execute("CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)")
     c.execute("""CREATE TABLE IF NOT EXISTS zayavka(
         id INTEGER, number TEXT, title TEXT, supplier TEXT, amount REAL, stage TEXT, company TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS reestr(
+        src TEXT, num TEXT, name TEXT, bin TEXT, iban TEXT, amount REAL, purpose TEXT, invoice TEXT)""")
     # миграция: старая zayavka без company (создана прошлой версией)
     zcols = {r[1] for r in c.execute("PRAGMA table_info(zayavka)").fetchall()}
     if "company" not in zcols:
@@ -179,9 +181,16 @@ def reconcile():
     """Сверка: заявки Bitrix ↔ платежи поставщикам 1С по № заявки (из назначения).
     Возвращает реестр заявок со статусом, разрез по компаниям, оплаты без заявки."""
     c = _db()
-    pays = c.execute("SELECT company,name,amount,date,purpose,doc FROM flow WHERE kind='out' AND supplier=1").fetchall()
-    zs = c.execute("SELECT id,number,company,supplier,amount,stage FROM zayavka").fetchall(); c.close()
+    pays = c.execute("SELECT company,name,amount,date,purpose,doc,bin FROM flow WHERE kind='out' AND supplier=1").fetchall()
+    zs = c.execute("SELECT id,number,company,supplier,amount,stage FROM zayavka").fetchall()
+    rs = c.execute("SELECT num,name,bin FROM reestr").fetchall(); c.close()
     znums = {z[1] for z in zs if z[1]}
+    # реестр финотдела (из Excel) — 3-й источник: по № и по БИН
+    reestr_nums = {r[0] for r in rs if r[0]}
+    reestr_by_bin = {}
+    for rnum, rname, rbin in rs:
+        if rbin:
+            reestr_by_bin.setdefault(rbin, (rnum, rname))
     # индекс поставщиков заявок: значимое слово → множество (id, №) — для фолбэка по имени
     z_by_tok = defaultdict(set)
     for zid, num, comp, sup, amt, stage in zs:
@@ -200,7 +209,7 @@ def reconcile():
 
     pay_nums, pay_no_num, pay_no_zayavka = {}, [], []
     cash_tot, cash_n, cash_matched = 0.0, 0, 0
-    for company, name, amt, date, purpose, doc in pays:
+    for company, name, amt, date, purpose, doc, pbin in pays:
         zn = _num_from(purpose)
         if zn:
             pay_nums.setdefault(zn, True)   # заявка «оплачена» и наличными, и с р/с
@@ -211,7 +220,14 @@ def reconcile():
         if not zn:
             pay_no_num.append((company, name, amt, date))
         elif zn not in znums:
-            pay_no_zayavka.append((zn, company, name, amt, date, _cand_by_supplier(name)))
+            # проверяем реестр финотдела: по № или по БИН
+            hit = None
+            if zn in reestr_nums:
+                hit = ("№", zn, "")
+            elif pbin and pbin in reestr_by_bin:
+                rn, rnm = reestr_by_bin[pbin]
+                hit = ("БИН", rn, rnm)
+            pay_no_zayavka.append((zn, company, name, amt, date, _cand_by_supplier(name), hit))
     z_list, by_company = [], defaultdict(lambda: [0, 0])   # by_company: [оплачено, всего]
     reserve, in_progress, rejected = [], [], []
     for zid, num, comp, sup, amt, stage in zs:
@@ -229,11 +245,14 @@ def reconcile():
             in_progress.append(z_list[-1])  # ещё в работе
     matched_n = sum(1 for z in z_list if z[5])
     waiting = reserve + in_progress
+    nz_in_reestr = sum(1 for x in pay_no_zayavka if x[6])
     return {"pays": len(pays), "z_total": len(zs), "matched_n": matched_n, "z_list": z_list,
             "reserve": reserve, "in_progress": in_progress, "rejected": rejected,
             "waiting": waiting, "pay_no_zayavka": pay_no_zayavka, "pay_no_num": pay_no_num,
             "by_company": dict(by_company),
-            "cash_tot": cash_tot, "cash_n": cash_n, "cash_matched": cash_matched}
+            "cash_tot": cash_tot, "cash_n": cash_n, "cash_matched": cash_matched,
+            "reestr_rows": len(rs), "nz_in_reestr": nz_in_reestr,
+            "nz_orphan": len(pay_no_zayavka) - nz_in_reestr}
 
 
 def store(payload):
@@ -248,6 +267,21 @@ def store(payload):
         for r in rows])
     for k, v in (("ts", payload.get("ts", "")), ("months", str(payload.get("months", "")))):
         c.execute("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
+    c.commit(); n = len(rows); c.close()
+    return n
+
+
+def store_reestr(payload):
+    """Принять реестр финотдела (из Excel): заменить таблицу reestr. payload={rows:[...], ts}."""
+    rows = payload.get("rows", [])
+    c = _db()
+    c.execute("DELETE FROM reestr")
+    c.executemany("INSERT INTO reestr VALUES(?,?,?,?,?,?,?,?)", [
+        (r.get("src", ""), str(r.get("num", "")), r.get("name", ""), str(r.get("bin", "")),
+         r.get("iban", ""), float(r.get("amount") or 0), r.get("purpose", ""), r.get("invoice", ""))
+        for r in rows])
+    c.execute("INSERT INTO meta(k,v) VALUES('reestr_ts',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+              (payload.get("ts", ""),))
     c.commit(); n = len(rows); c.close()
     return n
 
@@ -486,19 +520,26 @@ def dashboard():
             pct = (100 * d[0] / d[1]) if d[1] else 0
             bcrows += (f"<tr><td>{co or '—'}</td><td class=num>{d[0]}</td><td class=num>{d[1]}</td>"
                        f"<td class=num>{pct:.0f}%</td></tr>")
-        # оплата без заявки — платёж есть, № не найден среди заявок Bitrix; подсказываем заявку по поставщику
+        # оплата без заявки — платёж есть, № не найден среди заявок Bitrix.
+        # Сначала «нигде нет» (реальные подозрительные), потом объяснимые через реестр.
+        nzsorted = sorted(rec['pay_no_zayavka'], key=lambda x: (1 if x[6] else 0, -x[3]))
         nz = ""
-        for zn, co, nm, a, d, cand in sorted(rec['pay_no_zayavka'], key=lambda x: -x[3])[:15]:
+        for zn, co, nm, a, d, cand, hit in nzsorted[:20]:
+            if hit:
+                by, rnum, rname = hit
+                reestr_cell = (f"<span class='pill ok'>реестр: {by} №{rnum}</span>"
+                               + (f" <span style=color:#94a3b8>{rname[:26]}</span>" if rname else ""))
+            else:
+                reestr_cell = "<span class='pill pr'>нигде нет</span>"
             if cand and BX_PORTAL:
-                hint = (f"<a href='{BX_PORTAL}/crm/type/{BX_ENTITY}/details/{cand[0]}/' target=_blank>"
-                        f"№{cand[1]}</a> <span style=color:#94a3b8>(тот же поставщик — № мог быть указан неверно)</span>")
+                hint = f"<a href='{BX_PORTAL}/crm/type/{BX_ENTITY}/details/{cand[0]}/' target=_blank>№{cand[1]}</a>"
             elif cand:
-                hint = f"№{cand[1]} (тот же поставщик)"
+                hint = f"№{cand[1]}"
             else:
                 hint = "<span style=color:#94a3b8>—</span>"
             nz += (f"<tr><td>{co}</td><td>{nm}</td><td class='num neg'>{money(a)}</td>"
-                   f"<td>{d}</td><td>№{zn}</td><td>{hint}</td></tr>")
-        nz = nz or "<tr><td colspan=6 style=color:#94a3b8>нет</td></tr>"
+                   f"<td>{d}</td><td>№{zn}</td><td>{reestr_cell}</td><td>{hint}</td></tr>")
+        nz = nz or "<tr><td colspan=7 style=color:#94a3b8>нет</td></tr>"
         svedenie = (f"<div class=svh><h2>Сведение: заявки Bitrix ↔ платежи 1С</h2>"
                     f"<div class=svmeta>окно: {BX_MONTHS} мес · заявок из Bitrix: {rec['z_total']} · синхр.: {bx_sync} &nbsp; {refresh_btn}</div></div>"
                     f"<div class='svet wide' style='margin-bottom:10px'>{sv2}</div>"
@@ -510,9 +551,13 @@ def dashboard():
                     f"<div class=card><table><thead><tr><th>Компания</th><th class=num>Оплачено</th><th class=num>Всего заявок</th><th class=num>%</th></tr></thead>"
                     f"<tbody>{bcrows}</tbody></table><div class=note>Сколько заявок компании уже прошли оплату по 1С.</div></div>"
                     f"<h2>🔴 Оплата без заявки в Bitrix</h2>"
-                    f"<div class=card><table><thead><tr><th>Компания</th><th>Поставщик</th><th class=num>Сумма</th><th>Дата</th><th>№ в назначении</th><th>Возможная заявка</th></tr></thead>"
+                    f"<div class=cashln style='background:#f0f9ff;border-color:#bae6fd;color:#0c4a6e'>"
+                    f"Из {len(rec['pay_no_zayavka'])} платежей без заявки Bitrix: <b>{rec['nz_in_reestr']}</b> нашлись в реестре финотдела "
+                    f"(по № или БИН), <b>{rec['nz_orphan']}</b> — нигде нет (это и есть реальные кандидаты на проверку). "
+                    f"<span style=color:#94a3b8>Реестр: {rec['reestr_rows']} строк.</span></div>"
+                    f"<div class=card><table><thead><tr><th>Компания</th><th>Поставщик</th><th class=num>Сумма</th><th>Дата</th><th>№ в назначении</th><th>Реестр финотдела</th><th>Заявка по поставщику</th></tr></thead>"
                     f"<tbody>{nz}</tbody></table>"
-                    f"<div class=note>Платёж прошёл, но № заявки не найден среди заявок Bitrix за {BX_MONTHS} мес. Если в «возможной заявке» есть кандидат по поставщику — скорее всего № указан неверно. Если пусто — заявки правда нет, проверить основание.</div></div>")
+                    f"<div class=note>«Нигде нет» = ни в Bitrix, ни в реестре финотдела → проверить в первую очередь. «Реестр: № / БИН» = платёж есть в ручном реестре (легитимен, просто нет заявки Bitrix).</div></div>")
     else:
         svedenie = (f"<div class=note style='margin-top:14px'>Заявки Bitrix ещё не подгружены. "
                     f"{refresh_btn} — один раз, чтобы включить сведение.</div>")
@@ -565,14 +610,14 @@ class H(http.server.BaseHTTPRequestHandler):
         else: self._send("404", code=404)
 
     def do_POST(self):
-        if self.path != "/api/ingest":
+        if self.path not in ("/api/ingest", "/api/reestr"):
             self._send("404", code=404); return
         if self.headers.get("X-Service-Key") != KEY:
             self._send('{"error":"bad key"}', "application/json", 401); return
         try:
             n = int(self.headers.get("Content-Length", 0))
             payload = json.loads(self.rfile.read(n).decode("utf-8"))
-            saved = store(payload)
+            saved = store_reestr(payload) if self.path == "/api/reestr" else store(payload)
             self._send(json.dumps({"ok": True, "saved": saved}), "application/json")
         except Exception as e:
             self._send(json.dumps({"error": str(e)}), "application/json", 500)
