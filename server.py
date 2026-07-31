@@ -504,31 +504,36 @@ function legend(pairs,colors){var tot=0;pairs.forEach(function(p){tot+=p[1];});t
 function lineChart(host,data){
   if(!data||!data.length){host.innerHTML='<div class=note>нет данных за период</div>';return;}
   var svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('class','lchart');host.appendChild(svg);
-  var W=host.clientWidth||900,H=250,padL=66,padR=16,padT=14,padB=26,iw=W-padL-padR,ih=H-padT-padB,maxV=1;
-  data.forEach(function(d){maxV=Math.max(maxV,d.out,d.in);});
+  var W=host.clientWidth||900,H=250,padL=76,padR=16,padT=14,padB=26,iw=W-padL-padR,ih=H-padT-padB;
+  data.forEach(function(d){d._s=d.in-d.out;});
+  var maxV=1,minV=0;
+  data.forEach(function(d){maxV=Math.max(maxV,d.out,d.in,d._s);minV=Math.min(minV,d._s);});
+  var rng=(maxV-minV)||1;
   function X(i){return padL+(data.length<2?iw/2:iw*i/(data.length-1));}
-  function Y(v){return padT+ih-ih*v/maxV;}
+  function Y(v){return padT+ih-ih*(v-minV)/rng;}
   var p=[],g;
-  for(g=0;g<=4;g++){var gy=padT+ih-ih*g/4;p.push('<line x1='+padL+' y1='+gy+' x2='+(W-padR)+' y2='+gy+' stroke=#eef2f7 />');p.push('<text x='+(padL-8)+' y='+(gy+4)+' text-anchor=end class=axl>'+money(maxV*g/4)+'</text>');}
+  for(g=0;g<=4;g++){var gv=minV+rng*g/4,gy=Y(gv);p.push('<line x1='+padL+' y1='+gy+' x2='+(W-padR)+' y2='+gy+' stroke=#eef2f7 />');p.push('<text x='+(padL-8)+' y='+(gy+4)+' text-anchor=end class=axl>'+money(gv)+'</text>');}
+  if(minV<0){var zy=Y(0);p.push('<line x1='+padL+' y1='+zy+' x2='+(W-padR)+' y2='+zy+' stroke=#94a3b8 />');}
   [0,Math.floor(data.length/2),data.length-1].forEach(function(i){if(i<0||i>=data.length)return;p.push('<text x='+X(i)+' y='+(H-7)+' text-anchor=middle class=axl>'+String(data[i].d).slice(5)+'</text>');});
   function poly(k,c){return '<polyline points="'+data.map(function(d,i){return X(i)+','+Y(d[k]);}).join(' ')+'" fill=none stroke="'+c+'" stroke-width=2 />';}
-  p.push(poly('in','#0891b2'));p.push(poly('out','#ea580c'));
+  p.push(poly('_s','#6d28d9'));p.push(poly('in','#0891b2'));p.push(poly('out','#ea580c'));
   p.push('<line id=cfx y1='+padT+' y2='+(padT+ih)+' stroke=#cbd5e1 stroke-dasharray=3 style=display:none />');
-  p.push('<circle id=cfdo r=4 fill=#ea580c style=display:none /><circle id=cfdi r=4 fill=#0891b2 style=display:none />');
+  p.push('<circle id=cfdo r=4 fill=#ea580c style=display:none /><circle id=cfdi r=4 fill=#0891b2 style=display:none /><circle id=cfds r=4 fill=#6d28d9 style=display:none />');
   p.push('<rect id=cfov x='+padL+' y='+padT+' width='+iw+' height='+ih+' fill=transparent />');
   svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.innerHTML=p.join('');
-  var xl=svg.querySelector('#cfx'),dO=svg.querySelector('#cfdo'),dI=svg.querySelector('#cfdi'),ov=svg.querySelector('#cfov');
+  var xl=svg.querySelector('#cfx'),dO=svg.querySelector('#cfdo'),dI=svg.querySelector('#cfdi'),dS=svg.querySelector('#cfds'),ov=svg.querySelector('#cfov');
   ov.addEventListener('mousemove',function(e){
     var rc=svg.getBoundingClientRect(),px=(e.clientX-rc.left)*(W/rc.width);
     var i=Math.max(0,Math.min(data.length-1,Math.round((px-padL)/(iw||1)*(data.length-1)))),d=data[i],xx=X(i);
     xl.setAttribute('x1',xx);xl.setAttribute('x2',xx);xl.style.display='';
     dO.setAttribute('cx',xx);dO.setAttribute('cy',Y(d.out));dO.style.display='';
     dI.setAttribute('cx',xx);dI.setAttribute('cy',Y(d.in));dI.style.display='';
-    var s=d.in-d.out,drv=(d.top||[]).map(function(t){return '<div class=tdrv>'+esc(t.n)+' — '+money(t.a)+'</div>';}).join('');
-    tip.innerHTML='<b>'+d.d+'</b><div><span style=color:#fb923c>отток</span> '+money(d.out)+' ₸</div><div><span style=color:#22d3ee>приток</span> '+money(d.in)+' ₸</div><div>сальдо '+(s>=0?'+':'')+money(s)+' ₸</div>'+(drv?'<div class=tdh>крупные платежи дня:</div>'+drv:'');
+    dS.setAttribute('cx',xx);dS.setAttribute('cy',Y(d._s));dS.style.display='';
+    var s=d._s,drv=(d.top||[]).map(function(t){return '<div class=tdrv>'+esc(t.n)+' — '+money(t.a)+'</div>';}).join('');
+    tip.innerHTML='<b>'+d.d+'</b><div><span style=color:#fb923c>отток</span> '+money(d.out)+' ₸</div><div><span style=color:#22d3ee>приток</span> '+money(d.in)+' ₸</div><div><span style=color:#a78bfa>сальдо</span> '+(s>=0?'+':'')+money(s)+' ₸</div>'+(drv?'<div class=tdh>крупные платежи дня:</div>'+drv:'');
     tip.style.display='block';tip.style.left=Math.min(window.innerWidth-240,e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';
   });
-  ov.addEventListener('mouseleave',function(){xl.style.display='none';dO.style.display='none';dI.style.display='none';tip.style.display='none';});
+  ov.addEventListener('mouseleave',function(){xl.style.display='none';dO.style.display='none';dI.style.display='none';dS.style.display='none';tip.style.display='none';});
 }
 
 function rObzor(v){
@@ -539,7 +544,7 @@ function rObzor(v){
   v.appendChild(kp);
   v.appendChild(h2('Движение денег по дням (отток / приток)'));
   var ch=card('');var host=el('div','chartwrap');ch.appendChild(host);
-  ch.appendChild(el('div','clg','<span class=k><span class=sw style="background:#ea580c"></span>отток</span><span class=k><span class=sw style="background:#0891b2"></span>приток</span><span style=color:#94a3b8>наведи курсор — суммы дня и крупные платежи</span>'));
+  ch.appendChild(el('div','clg','<span class=k><span class=sw style="background:#ea580c"></span>отток</span><span class=k><span class=sw style="background:#0891b2"></span>приток</span><span class=k><span class=sw style="background:#6d28d9"></span>сальдо (день)</span><span style=color:#94a3b8>наведи курсор — суммы и крупные платежи дня</span>'));
   v.appendChild(ch);lineChart(host,D.series);
   v.appendChild(h2('Сведение с Bitrix'));
   var sv=el('div','svet wide');
