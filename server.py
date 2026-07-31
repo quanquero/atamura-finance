@@ -33,6 +33,7 @@ def _db():
         id INTEGER, number TEXT, title TEXT, supplier TEXT, amount REAL, stage TEXT, company TEXT)""")
     c.execute("""CREATE TABLE IF NOT EXISTS reestr(
         src TEXT, num TEXT, name TEXT, bin TEXT, iban TEXT, amount REAL, purpose TEXT, invoice TEXT)""")
+    c.execute("CREATE TABLE IF NOT EXISTS zayavka_idx(num TEXT PRIMARY KEY, id INTEGER)")
     # миграция: старая zayavka без company (создана прошлой версией)
     zcols = {r[1] for r in c.execute("PRAGMA table_info(zayavka)").fetchall()}
     if "company" not in zcols:
@@ -109,6 +110,31 @@ def sync_bitrix():
     return {"ok": True, "заявок": n}
 
 
+def sync_bitrix_full():
+    """Лёгкий индекс № → id по ВСЕМ заявкам (вся история) — чтобы матчить платежи вне окна."""
+    if not BITRIX:
+        return {"error": "BITRIX_WEBHOOK не задан"}
+    idx, start = {}, 0
+    while True:
+        d = _bx("crm.item.list", {"entityTypeId": BX_ENTITY, "start": start, "order[id]": "desc",
+                                   "select[]": ["id", "ufCrm4_1644310716"]})
+        items = d.get("result", {}).get("items", [])
+        for it in items:
+            n = str(it.get("ufCrm4_1644310716") or "").strip()
+            if n:
+                idx.setdefault(n, it.get("id"))
+        if len(items) < 50 or len(idx) >= 40000:
+            break
+        start += 50
+    c = _db()
+    c.execute("DELETE FROM zayavka_idx")
+    c.executemany("INSERT OR REPLACE INTO zayavka_idx VALUES(?,?)", list(idx.items()))
+    c.execute("INSERT INTO meta(k,v) VALUES('idx_ts',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+              (datetime.now().strftime("%Y-%m-%d %H:%M"),))
+    c.commit(); n = len(idx); c.close()
+    return {"ok": True, "индекс_заявок": n}
+
+
 def _num_from(s):
     """Вытащить № заявки (15xxx–16xxx…) из текста."""
     m = re.search(r"№\s*(\d{4,6})", str(s or "")) or re.search(r"\b(1[0-9]{4})\b", str(s or ""))
@@ -183,8 +209,11 @@ def reconcile():
     c = _db()
     pays = c.execute("SELECT company,name,amount,date,purpose,doc,bin FROM flow WHERE kind='out' AND supplier=1").fetchall()
     zs = c.execute("SELECT id,number,company,supplier,amount,stage FROM zayavka").fetchall()
-    rs = c.execute("SELECT num,name,bin FROM reestr").fetchall(); c.close()
-    znums = {z[1] for z in zs if z[1]}
+    rs = c.execute("SELECT num,name,bin FROM reestr").fetchall()
+    idx = dict(c.execute("SELECT num,id FROM zayavka_idx").fetchall()); c.close()
+    znums_win = {z[1] for z in zs if z[1]}          # заявки в окне (для статуса)
+    # для определения «сироты» — полный индекс всех заявок Bitrix, если загружен; иначе окно
+    known_nums = set(idx) if idx else znums_win
     # реестр финотдела (из Excel) — 3-й источник: по № и по БИН
     reestr_nums = {r[0] for r in rs if r[0]}
     reestr_by_bin = {}
@@ -215,11 +244,11 @@ def reconcile():
             pay_nums.setdefault(zn, True)   # заявка «оплачена» и наличными, и с р/с
         if "кассов" in (doc or "").lower():   # РКО — наличные, отдельный поток
             cash_tot += amt; cash_n += 1
-            if zn and zn in znums: cash_matched += 1
+            if zn and zn in known_nums: cash_matched += 1
             continue
         if not zn:
             pay_no_num.append((company, name, amt, date))
-        elif zn not in znums:
+        elif zn not in known_nums:
             # проверяем реестр финотдела: по № или по БИН
             hit = None
             if zn in reestr_nums:
@@ -344,6 +373,20 @@ td a{color:#0e7490;font-weight:700;text-decoration:none}td a:hover{text-decorati
 .clg .k{display:inline-flex;align-items:center;gap:5px}.clg .sw{width:14px;height:3px;border-radius:2px;display:inline-block}
 .cftip{position:fixed;display:none;background:#0f172a;color:#fff;padding:8px 11px;border-radius:8px;font-size:11.5px;pointer-events:none;z-index:60;box-shadow:0 6px 20px rgba(0,0,0,.3);max-width:230px}
 .cftip .tdh{margin-top:5px;color:#94a3b8;font-size:10px}.cftip .tdrv{color:#cbd5e1;font-size:10.5px}
+.loading{padding:40px;text-align:center;color:#94a3b8}.err{padding:20px;color:#b91c1c}
+.tabs{background:#0f2233;padding:0 12px;display:flex;gap:2px;overflow-x:auto;position:sticky;top:0;z-index:30}
+.tab{background:none;border:0;color:#94a3b8;padding:12px 16px;font-size:13.5px;font-weight:600;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap}
+.tab:hover{color:#e2e8f0}.tab.on{color:#fff;border-bottom-color:#22d3ee}
+.fbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:12px 14px;background:#fff;border:1px solid #e2e8f0;border-bottom:0;border-radius:12px 12px 0 0}
+.search{flex:1;min-width:200px;padding:7px 11px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px}
+.fbar select{padding:7px 9px;border:1px solid #cbd5e1;border-radius:8px;font-size:12.5px;background:#fff}
+.cbf{font-size:12.5px;color:#475569;display:inline-flex;align-items:center;gap:4px}
+.fsum{font-size:11.5px;color:#94a3b8;margin-left:auto;font-variant-numeric:tabular-nums}
+.tblscroll{max-height:70vh;overflow:auto;border:1px solid #e2e8f0;border-top:0;border-radius:0 0 12px 12px;background:#fff}
+.tblscroll thead th{position:sticky;top:0;z-index:1}
+.sorth{cursor:pointer;user-select:none}.sorth:hover{background:#e2e8f0}
+.tg{font-size:10px;padding:2px 7px;border-radius:5px;font-weight:600;white-space:nowrap}
+.t-подряд{background:#cffafe;color:#0e7490}.t-поставка{background:#ffedd5;color:#c2410c}.t-услуга{background:#ede9fe;color:#6d28d9}.t-прочее{background:#f1f5f9;color:#64748b}
 """
 
 # JS линейного графика cashflow (данные приходят в window.CF). Вынесено из f-строки (много {}).
@@ -389,203 +432,204 @@ CF_JS = r"""
 """
 
 
+APP_JS = r'''
+(function(){
+var app=document.getElementById('app'), tip=document.getElementById('cftip');
+function money(n){return (Math.round(n||0)).toLocaleString('ru-RU').replace(/,/g,' ');}
+function el(t,c,h){var e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');}
+var D=null, tab='obzor';
+var TABS=[['obzor','Обзор'],['pay','Платежи 1С'],['sved','Сведение'],['ctrl','Контроль']];
+
+fetch('data.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){D=d;boot();})
+  .catch(function(e){app.className='';app.innerHTML='<div class=wrap><div class=err>Ошибка загрузки данных: '+e+'</div></div>';});
+
+function boot(){
+  var m=D.meta||{};
+  app.className='';app.innerHTML='';
+  var top=el('div','top');
+  top.innerHTML='<b>◎ ATAMŪRA · Финансы</b><div class=s>срез 1С: '+esc(m.ts||'—')+' · за '+esc(m.months||'?')+' мес · Bitrix: '+esc(m.bx_sync||'—')+(m.idx_ts?(' · полный индекс: '+esc(m.idx_ts)):' · <a href="/sync-full" style="color:#7dd3fc">включить полный индекс</a>')+'</div>';
+  app.appendChild(top);
+  var bar=el('div','tabs');
+  TABS.forEach(function(t){var b=el('button','tab'+(t[0]==tab?' on':''),t[1]);b.onclick=function(){tab=t[0];for(var i=0;i<bar.children.length;i++)bar.children[i].classList.toggle('on',TABS[i][0]==tab);render();};bar.appendChild(b);});
+  app.appendChild(bar);
+  var v=el('div','wrap');v.id='view';app.appendChild(v);
+  render();
+}
+function render(){var v=document.getElementById('view');v.innerHTML='';({obzor:rObzor,pay:rPay,sved:rSved,ctrl:rCtrl}[tab])(v);}
+
+function card(inner){var c=el('div','card');if(typeof inner=='string')c.innerHTML=inner;else c.appendChild(inner);return c;}
+function h2(t){return el('h2',null,t);}
+function kpiTile(l,val,cls){return '<div class=kpi><div class=l>'+l+'</div><div class="v '+(cls||'')+'">'+val+'</div></div>';}
+function svc(cls,n,l){return '<div class="sv '+cls+'"><div class=n>'+n+'</div><div class=l>'+l+'</div></div>';}
+
+function selectFilter(label,key,values){
+  var s=el('select');s.innerHTML='<option value="">'+label+': все</option>'+values.map(function(v){return '<option value="'+esc(v)+'">'+esc(v)+'</option>';}).join('');
+  return {node:s,test:function(x){return !s.value||String(x[key])===s.value;}};
+}
+function dataTable(rows,cols,opts){
+  opts=opts||{};var state={sort:opts.sort||null,dir:opts.dir||-1,q:''};
+  var wrap=el('div');var bar=el('div','fbar');
+  var inp=el('input','search');inp.type='search';inp.placeholder=opts.searchPlaceholder||'поиск…';
+  inp.oninput=function(){state.q=inp.value.toLowerCase();draw();};bar.appendChild(inp);
+  (opts.filters||[]).forEach(function(f){bar.appendChild(f.node);f.node.addEventListener('change',draw);});
+  var summary=el('span','fsum');bar.appendChild(summary);wrap.appendChild(bar);
+  var sc=el('div','tblscroll');var tbl=el('table');sc.appendChild(tbl);wrap.appendChild(sc);
+  function draw(){
+    var r=rows.filter(function(x){return (opts.filters||[]).every(function(f){return f.test(x);});});
+    if(state.q){r=r.filter(function(x){return (opts.searchText?opts.searchText(x):Object.values(x).join(' ')).toLowerCase().indexOf(state.q)>=0;});}
+    if(state.sort){var k=state.sort,d=state.dir;r=r.slice().sort(function(a,b){var av=a[k],bv=b[k];if(typeof av=='number'&&typeof bv=='number')return (av-bv)*d;return String(av==null?'':av).localeCompare(String(bv==null?'':bv))*d;});}
+    var lim=opts.limit||500;
+    tbl.innerHTML='<thead><tr>'+cols.map(function(c){return '<th class="sorth '+(c.num?'num':'')+'" data-k="'+c.key+'">'+c.label+(state.sort==c.key?(state.dir>0?' ▲':' ▼'):'')+'</th>';}).join('')+'</tr></thead><tbody>'+
+      r.slice(0,lim).map(function(x){return '<tr>'+cols.map(function(c){return '<td class="'+(c.num?'num':'')+'">'+(c.render?c.render(x):esc(x[c.key]))+'</td>';}).join('')+'</tr>';}).join('')+'</tbody>';
+    summary.textContent='Показано '+Math.min(lim,r.length)+' из '+r.length+(opts.sumKey?(' · Σ '+money(r.reduce(function(s,x){return s+(x[opts.sumKey]||0);},0))+' ₸'):'');
+    tbl.querySelectorAll('.sorth').forEach(function(th){th.onclick=function(){var k=th.dataset.k;if(state.sort==k)state.dir=-state.dir;else{state.sort=k;state.dir=-1;}draw();};});
+  }
+  draw();return wrap;
+}
+
+function donutSVG(pairs,colors){
+  var size=180,r=62,w=24,cx=size/2,cy=size/2,tot=0,i;
+  for(i=0;i<pairs.length;i++){if(pairs[i][1]>0)tot+=pairs[i][1];}
+  tot=tot||1;var a0=-Math.PI/2,segs='';
+  pairs.forEach(function(p){if(p[1]<=0)return;var fr=p[1]/tot,a1=a0+fr*2*Math.PI;
+    var x0=cx+r*Math.cos(a0),y0=cy+r*Math.sin(a0),x1=cx+r*Math.cos(a1),y1=cy+r*Math.sin(a1),lg=fr>0.5?1:0;
+    segs+='<path d="M '+x0.toFixed(2)+' '+y0.toFixed(2)+' A '+r+' '+r+' 0 '+lg+' 1 '+x1.toFixed(2)+' '+y1.toFixed(2)+'" fill=none stroke="'+(colors[p[0]]||'#94a3b8')+'" stroke-width='+w+'><title>'+esc(p[0])+': '+money(p[1])+' ₸ · '+Math.round(fr*100)+'%</title></path>';
+    a0=a1;});
+  return '<svg viewBox="0 0 '+size+' '+size+'" width='+size+' height='+size+' class=donut>'+segs+'<text x='+cx+' y='+(cy-2)+' text-anchor=middle class=dc>'+money(tot)+'</text><text x='+cx+' y='+(cy+14)+' text-anchor=middle class=dcl>₸</text></svg>';
+}
+function legend(pairs,colors){var tot=0;pairs.forEach(function(p){tot+=p[1];});tot=tot||1;
+  return '<div class=lgrow>'+pairs.map(function(p){return '<div class=lgi><span class=sw style="background:'+(colors[p[0]]||'#94a3b8')+'"></span><span class=lgn>'+esc(p[0])+'</span><b>'+money(p[1])+'</b><span class=pc>'+Math.round(p[1]/tot*100)+'%</span></div>';}).join('')+'</div>';
+}
+function lineChart(host,data){
+  if(!data||!data.length){host.innerHTML='<div class=note>нет данных за период</div>';return;}
+  var svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('class','lchart');host.appendChild(svg);
+  var W=host.clientWidth||900,H=250,padL=66,padR=16,padT=14,padB=26,iw=W-padL-padR,ih=H-padT-padB,maxV=1;
+  data.forEach(function(d){maxV=Math.max(maxV,d.out,d.in);});
+  function X(i){return padL+(data.length<2?iw/2:iw*i/(data.length-1));}
+  function Y(v){return padT+ih-ih*v/maxV;}
+  var p=[],g;
+  for(g=0;g<=4;g++){var gy=padT+ih-ih*g/4;p.push('<line x1='+padL+' y1='+gy+' x2='+(W-padR)+' y2='+gy+' stroke=#eef2f7 />');p.push('<text x='+(padL-8)+' y='+(gy+4)+' text-anchor=end class=axl>'+money(maxV*g/4)+'</text>');}
+  [0,Math.floor(data.length/2),data.length-1].forEach(function(i){if(i<0||i>=data.length)return;p.push('<text x='+X(i)+' y='+(H-7)+' text-anchor=middle class=axl>'+String(data[i].d).slice(5)+'</text>');});
+  function poly(k,c){return '<polyline points="'+data.map(function(d,i){return X(i)+','+Y(d[k]);}).join(' ')+'" fill=none stroke="'+c+'" stroke-width=2 />';}
+  p.push(poly('in','#0891b2'));p.push(poly('out','#ea580c'));
+  p.push('<line id=cfx y1='+padT+' y2='+(padT+ih)+' stroke=#cbd5e1 stroke-dasharray=3 style=display:none />');
+  p.push('<circle id=cfdo r=4 fill=#ea580c style=display:none /><circle id=cfdi r=4 fill=#0891b2 style=display:none />');
+  p.push('<rect id=cfov x='+padL+' y='+padT+' width='+iw+' height='+ih+' fill=transparent />');
+  svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.innerHTML=p.join('');
+  var xl=svg.querySelector('#cfx'),dO=svg.querySelector('#cfdo'),dI=svg.querySelector('#cfdi'),ov=svg.querySelector('#cfov');
+  ov.addEventListener('mousemove',function(e){
+    var rc=svg.getBoundingClientRect(),px=(e.clientX-rc.left)*(W/rc.width);
+    var i=Math.max(0,Math.min(data.length-1,Math.round((px-padL)/(iw||1)*(data.length-1)))),d=data[i],xx=X(i);
+    xl.setAttribute('x1',xx);xl.setAttribute('x2',xx);xl.style.display='';
+    dO.setAttribute('cx',xx);dO.setAttribute('cy',Y(d.out));dO.style.display='';
+    dI.setAttribute('cx',xx);dI.setAttribute('cy',Y(d.in));dI.style.display='';
+    var s=d.in-d.out,drv=(d.top||[]).map(function(t){return '<div class=tdrv>'+esc(t.n)+' — '+money(t.a)+'</div>';}).join('');
+    tip.innerHTML='<b>'+d.d+'</b><div><span style=color:#fb923c>отток</span> '+money(d.out)+' ₸</div><div><span style=color:#22d3ee>приток</span> '+money(d.in)+' ₸</div><div>сальдо '+(s>=0?'+':'')+money(s)+' ₸</div>'+(drv?'<div class=tdh>крупные платежи дня:</div>'+drv:'');
+    tip.style.display='block';tip.style.left=Math.min(window.innerWidth-240,e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';
+  });
+  ov.addEventListener('mouseleave',function(){xl.style.display='none';dO.style.display='none';dI.style.display='none';tip.style.display='none';});
+}
+
+function rObzor(v){
+  var k=D.kpi,c=D.counts,saldo=k.in-k.out;
+  var kp=el('div','kpis');
+  kp.innerHTML=kpiTile('Отток (исходящие)',money(k.out)+' ₸')+kpiTile('Приток (входящие)',money(k.in)+' ₸')+
+    kpiTile('Сальдо',(saldo>=0?'+':'')+money(saldo)+' ₸',saldo>=0?'pos':'negv')+kpiTile('Оплаты поставщикам',money(k.sup)+' ₸');
+  v.appendChild(kp);
+  v.appendChild(h2('Движение денег по дням (отток / приток)'));
+  var ch=card('');var host=el('div','chartwrap');ch.appendChild(host);
+  ch.appendChild(el('div','clg','<span class=k><span class=sw style="background:#ea580c"></span>отток</span><span class=k><span class=sw style="background:#0891b2"></span>приток</span><span style=color:#94a3b8>наведи курсор — суммы дня и крупные платежи</span>'));
+  v.appendChild(ch);lineChart(host,D.series);
+  v.appendChild(h2('Сведение с Bitrix'));
+  var sv=el('div','svet wide');
+  sv.innerHTML=svc('g',c.matched,'Оплачено (есть платёж 1С)')+svc('y',c.reserve,'Одобрено, ждёт 1С')+svc('bl',c.in_progress,'В работе')+svc('nu',c.rejected,'Отказано')+svc('r',c.nz_orphan,'Оплата без заявки (нигде нет)');
+  v.appendChild(sv);
+  var byco={},bycat={};
+  D.payments.forEach(function(p){byco[p.company]=(byco[p.company]||0)+p.amount;bycat[p.cat]=(bycat[p.cat]||0)+p.amount;});
+  var comp=Object.keys(byco).map(function(k){return [k,byco[k]];}).sort(function(a,b){return b[1]-a[1];});
+  var top=comp.slice(0,7),rest=comp.slice(7).reduce(function(s,x){return s+x[1];},0);if(rest>0)top.push(['прочее',rest]);
+  var pal=['#0e7490','#c2410c','#7c3aed','#0891b2','#b45309','#4d7c0f','#be123c'],ccol={};top.forEach(function(x,i){ccol[x[0]]=pal[i]||'#cbd5e1';});ccol['прочее']='#cbd5e1';
+  var catcol={'подряд':'#0e7490','поставка':'#c2410c','услуга':'#7c3aed','прочее':'#94a3b8'};
+  var catp=['подряд','поставка','услуга','прочее'].filter(function(k){return bycat[k]>0;}).map(function(k){return [k,bycat[k]];});
+  v.appendChild(h2('Отток по дочкам'));
+  v.appendChild(card('<div class=donutwrap>'+donutSVG(top,ccol)+legend(top,ccol)+'</div>'));
+  v.appendChild(h2('Разрез по типу расхода'));
+  v.appendChild(card('<div class=donutwrap>'+donutSVG(catp,catcol)+legend(catp,catcol)+'</div>'));
+}
+
+function rPay(v){
+  var companies=Object.keys(D.payments.reduce(function(a,p){a[p.company]=1;return a;},{})).sort();
+  var fCo=selectFilter('Компания','company',companies);
+  var fCat=selectFilter('Тип','cat',['подряд','поставка','услуга','прочее']);
+  var cb=el('label','cbf','<input type=checkbox> только наличные');var chk=cb.querySelector('input');
+  var fCash={node:cb,test:function(x){return !chk.checked||x.cash;}};chk.addEventListener('change',function(){});
+  var cols=[
+    {key:'date',label:'Дата'},
+    {key:'company',label:'Компания'},
+    {key:'name',label:'Поставщик'},
+    {key:'num',label:'№',render:function(x){return x.num?('№'+x.num):'<span style=color:#cbd5e1>—</span>';}},
+    {key:'cat',label:'Тип',render:function(x){return '<span class="tg t-'+x.cat+'">'+x.cat+'</span>';}},
+    {key:'purpose',label:'Назначение',render:function(x){return '<span title="'+esc(x.purpose)+'">'+esc((x.purpose||'').slice(0,52))+'</span>';}},
+    {key:'amount',label:'Сумма',num:true,render:function(x){return money(x.amount)+(x.cash?' 💵':'');}}
+  ];
+  v.appendChild(h2('Все платежи 1С'));
+  v.appendChild(card(dataTable(D.payments,cols,{filters:[fCo,fCat,fCash],sort:'amount',dir:-1,sumKey:'amount',
+    searchText:function(x){return x.name+' '+x.purpose+' '+x.num+' '+x.company;},searchPlaceholder:'поиск: поставщик, назначение, №…',limit:1500})));
+}
+
+function rSved(v){
+  var stmap={success:'Успешно',fail:'Отказано',progress:'в работе'};
+  D.zayavki.forEach(function(z){z._st=z.paid?'оплачено':(z.stage=='fail'?'отказано':'ждёт 1С');});
+  var fSt=selectFilter('Статус','_st',['оплачено','ждёт 1С','отказано']);
+  var bx=D.bx_portal,ent=D.bx_entity;
+  var zcols=[
+    {key:'num',label:'Заявка',render:function(z){return (bx&&z.id)?('<a href="'+bx+'/crm/type/'+ent+'/details/'+z.id+'/" target=_blank>№'+z.num+'</a>'):('№'+z.num);}},
+    {key:'company',label:'Компания'},{key:'supplier',label:'Поставщик'},
+    {key:'amount',label:'Сумма',num:true,render:function(z){return money(z.amount);}},
+    {key:'_st',label:'Статус',render:function(z){return (z.paid?'<span class="pill ok">✅ оплачено</span>':'<span class="pill wait">⏳ ждёт</span>')+' <span class="pill '+(z.stage=='fail'?'pr':(z.stage=='success'?'ok':'py'))+'">'+(stmap[z.stage]||z.stage)+'</span>';}}
+  ];
+  v.appendChild(h2('Заявки Bitrix ↔ платежи 1С'));
+  v.appendChild(card(dataTable(D.zayavki,zcols,{filters:[fSt],sort:'amount',dir:-1,
+    searchText:function(z){return z.num+' '+z.company+' '+z.supplier;},searchPlaceholder:'поиск: №, компания, поставщик…',limit:1500})));
+  var c=D.counts;
+  D.orphans.forEach(function(o){o._r=o.reestr?'в реестре':'нигде нет';});
+  var fR=selectFilter('Реестр','_r',['нигде нет','в реестре']);
+  var ocols=[
+    {key:'num',label:'№',render:function(o){return '№'+o.num;}},
+    {key:'company',label:'Компания'},{key:'name',label:'Поставщик'},
+    {key:'amount',label:'Сумма',num:true,render:function(o){return money(o.amount);}},
+    {key:'date',label:'Дата'},
+    {key:'_r',label:'Реестр финотдела',render:function(o){return o.reestr?('<span class="pill ok">реестр: '+o.reestr.by+' №'+o.reestr.num+'</span>'):'<span class="pill pr">нигде нет</span>';}},
+    {key:'cand',label:'Заявка по поставщику',render:function(o){return o.cand?('№'+o.cand):'<span style=color:#cbd5e1>—</span>';}}
+  ];
+  v.appendChild(h2('🔴 Оплата без заявки ('+c.nz+')'));
+  v.appendChild(el('div','cashln','Из '+c.nz+' платежей без заявки Bitrix: <b>'+c.nz_in_reestr+'</b> нашлись в реестре финотдела, <b>'+c.nz_orphan+'</b> — нигде нет (реальные кандидаты на проверку).'));
+  v.appendChild(card(dataTable(D.orphans,ocols,{filters:[fR],sort:'amount',dir:-1,sumKey:'amount',
+    searchText:function(o){return o.num+' '+o.name+' '+o.company;},searchPlaceholder:'поиск: №, поставщик, компания…',limit:1500})));
+}
+
+function rCtrl(v){
+  var g={};D.payments.forEach(function(p){if(!p.bin)return;var k=p.company+'|'+p.bin+'|'+Math.round(p.amount)+'|'+p.date;(g[k]=g[k]||[]).push(p);});
+  var dub=Object.keys(g).map(function(k){return g[k];}).filter(function(a){return a.length>1;}).map(function(a){return {company:a[0].company,name:a[0].name,bin:a[0].bin,amount:a[0].amount,date:a[0].date,n:a.length};});
+  var cols=[{key:'company',label:'Компания'},{key:'name',label:'Поставщик'},{key:'bin',label:'БИН'},
+    {key:'amount',label:'Сумма',num:true,render:function(x){return money(x.amount);}},{key:'date',label:'Дата'},{key:'n',label:'Платежей',num:true}];
+  v.appendChild(h2('🔴 Кандидаты в дубли (оплаты поставщикам)'));
+  v.appendChild(el('div','note','Один БИН + одинаковая сумма + одна дата в одной компании, ≥2 платежей — проверить перед/после оплаты.'));
+  v.appendChild(card(dataTable(dub,cols,{sort:'amount',dir:-1,searchText:function(x){return x.name+' '+x.company+' '+x.bin;},searchPlaceholder:'поиск…',limit:800})));
+}
+})();
+'''
+
+
 def dashboard():
-    c = _db()
-    flow = c.execute("SELECT company,kind,date,bin,name,amount,vidop,supplier,number,purpose,comment FROM flow").fetchall()
-    meta = dict(c.execute("SELECT k,v FROM meta").fetchall()); c.close()
-    if not flow:
-        return f"<!doctype html><meta charset=utf-8><style>{CSS}</style><div class=top><b>ATAMŪRA · Финансы</b></div><div class=wrap><p>Ядро пустое — срез ещё не пришёл. Запусти парсер с push.</p></div>"
-
-    out = [r for r in flow if r[1] == "out"]
-    inp = [r for r in flow if r[1] == "in"]
-    rec = [r for r in flow if r[1] == "receipt"]
-    sup = [r for r in out if r[7] == 1]
-    out_t = sum(r[5] for r in out); in_t = sum(r[5] for r in inp)
-    done_t = sum(r[5] for r in rec); sup_t = sum(r[5] for r in sup); saldo = in_t - out_t
-
-    def kpi(v, l, cls=""):
-        return f"<div class=kpi><div class=l>{l}</div><div class='v {cls}'>{v}</div></div>"
-    kpis = (kpi(money(out_t)+" ₸", "Отток (исходящие)") + kpi(money(in_t)+" ₸", "Приток (входящие)")
-            + kpi(("+" if saldo >= 0 else "")+money(saldo)+" ₸", "Сальдо", "pos" if saldo >= 0 else "negv")
-            + kpi(money(sup_t)+" ₸", "Оплаты поставщикам") + kpi(money(done_t)+" ₸", "Выполнено (АВР)"))
-
-    def _legend(pairs, colors):
-        tot = sum(v for _, v in pairs) or 1
-        h = ""
-        for lb, v in pairs:
-            col = colors.get(lb, "#94a3b8")
-            h += (f"<div class=lgi><span class=sw style='background:{col}'></span>"
-                  f"<span class=lgn>{lb}</span><b>{money(v)}</b><span class=pc>{v/tot*100:.0f}%</span></div>")
-        return f"<div class=lgrow>{h}</div>"
-
-    # обороты по дочкам — пончик «отток по дочкам» (топ-7 + прочее)
-    byco = defaultdict(lambda: [0.0, 0.0])
-    for r in out: byco[r[0]][0] += r[5]
-    for r in inp: byco[r[0]][1] += r[5]
-    comp_out = sorted(((co, d[0]) for co, d in byco.items()), key=lambda x: -x[1])
-    _pal = ["#0e7490", "#c2410c", "#7c3aed", "#0891b2", "#b45309", "#4d7c0f", "#be123c"]
-    top7 = comp_out[:7]
-    rest = sum(v for _, v in comp_out[7:])
-    comp_pairs = top7 + ([("прочее", rest)] if rest > 0 else [])
-    comp_col = {co: _pal[i] for i, (co, _) in enumerate(top7)}
-    comp_col["прочее"] = "#cbd5e1"
-    oborot = f"<div class=donutwrap>{_donut(comp_pairs, comp_col)}{_legend(comp_pairs, comp_col)}</div>"
-
-    # дубли: company+bin+amount+date, >1
-    g = defaultdict(list)
-    for r in sup:
-        if r[3]: g[(r[0], r[3], round(r[5], 2), r[2])].append(r)
-    dub = {k: v for k, v in g.items() if len(v) > 1}
-    dub_rows = "".join(f"<tr><td>{v[0][0]}</td><td>{v[0][4]}</td><td class='num neg'>{money(a)}</td><td>{d}</td><td class=num>{len(v)}</td></tr>"
-                       for (co, b, a, d), v in sorted(dub.items(), key=lambda x: -x[0][2])) or "<tr><td colspan=5 style=color:#94a3b8>Дублей не найдено</td></tr>"
-
-    # расхождения (поступило vs оплачено по company+bin)
-    byc = defaultdict(lambda: [0.0, 0.0, ""])
-    for r in sup:
-        if r[3]: byc[(r[0], r[3])][1] += r[5]; byc[(r[0], r[3])][2] = r[4]
-    for r in rec:
-        if r[3]:
-            byc[(r[0], r[3])][0] += r[5]
-            if not byc[(r[0], r[3])][2]: byc[(r[0], r[3])][2] = r[4]
-    disc = sorted(((abs(d[0]-d[1]), co, d[2], d[0], d[1], d[0]-d[1]) for (co, b), d in byc.items()), reverse=True)[:12]
-    disc_rows = ""
-    for _, co, nm2, done, paid, diff in disc:
-        pcls = "pr" if diff < -1 else "py"
-        plabel = "оплата&gt;поступл" if diff < -1 else "поступл&gt;оплата"
-        disc_rows += (f"<tr><td>{co}</td><td>{nm2}</td><td class=num>{money(done)}</td>"
-                      f"<td class=num>{money(paid)}</td><td class='num b'>{money(diff)}</td>"
-                      f"<td><span class='pill {pcls}'>{plabel}</span></td></tr>")
-
-    # топ поставщиков (бары)
-    tot = defaultdict(float); nmm = {}
-    for r in sup:
-        k = r[3] or r[4]; tot[k] += r[5]; nmm[k] = r[4]
-    tops = sorted(tot.items(), key=lambda x: -x[1])[:12]
-    tmx = tops[0][1] if tops else 1
-    top_bars = ""
-    for k, s in tops:
-        w = max(1, s/tmx*100)
-        top_bars += (f"<div class=brow><div class=hd><span class=co>{nmm[k]}</span><span class=vv>{money(s)} ₸</span></div>"
-                     f"<div class=track><div class='fill fo' style='width:{w:.1f}%'></div></div></div>")
-
-    # разрез по типу расхода (услуги/поставки/подряд) — пончик, эвристика по назначению платежа
-    cats = defaultdict(float)
-    for r in sup:
-        cats[_category(r[9], r[10], r[4], r[6])] += r[5]
-    cat_col = {"подряд": "#0e7490", "поставка": "#c2410c", "услуга": "#7c3aed", "прочее": "#94a3b8"}
-    cat_pairs = [(k, cats.get(k, 0.0)) for k in ["подряд", "поставка", "услуга", "прочее"] if cats.get(k, 0) > 0]
-    cat_donut = f"<div class=donutwrap>{_donut(cat_pairs, cat_col)}{_legend(cat_pairs, cat_col)}</div>"
-
-    # временной ряд отток/приток (для линейного графика с тултипом)
-    series = _timeseries(flow)
-    chart_block = ("<div class=chartwrap><svg id=cfsvg class=lchart></svg></div>"
-                   "<div class=clg><span class=k><span class=sw style='background:#ea580c'></span>отток</span>"
-                   "<span class=k><span class=sw style='background:#0891b2'></span>приток</span>"
-                   "<span style=color:#94a3b8>наведи курсор — суммы дня и крупные платежи</span></div>"
-                   "<script>window.CF=" + json.dumps(series, ensure_ascii=False) + ";" + CF_JS + "</script>")
-
-    svet = (f"<div class='sv r'><div class=n>{len(dub)}</div><div class=l>Кандидаты в дубли</div></div>"
-            f"<div class='sv y'><div class=n>{len(disc)}</div><div class=l>Расхождения (проверить)</div></div>"
-            f"<div class='sv g'><div class=n>{len(byco)}</div><div class=l>Компаний в своде</div></div>")
-
-    rec = reconcile()
-    bx_sync = meta.get('bx_sync', '—')
-    refresh_btn = ("<a href='/refresh' class=rbtn "
-                   "onclick=\"this.textContent='↻ обновляю из Bitrix…'\">↻ Обновить из Bitrix</a>")
-    if rec.get("z_total"):
-        sv2 = (f"<div class='sv g'><div class=n>{rec['matched_n']}</div><div class=l>Оплачено (есть платёж 1С)</div></div>"
-               f"<div class='sv y'><div class=n>{len(rec['reserve'])}</div><div class=l>Одобрено, ждёт 1С (резерв)</div></div>"
-               f"<div class='sv bl'><div class=n>{len(rec['in_progress'])}</div><div class=l>В работе</div></div>"
-               f"<div class='sv nu'><div class=n>{len(rec['rejected'])}</div><div class=l>Отказано</div></div>"
-               f"<div class='sv r'><div class=n>{len(rec['pay_no_zayavka'])}</div><div class=l>Оплата без заявки</div></div>")
-        cash_line = (f"<div class=cashln>💵 Наличные (касса, РКО): <b>{money(rec['cash_tot'])} ₸</b> · "
-                     f"{rec['cash_n']} платежей · сматчено с заявкой: {rec['cash_matched']}. "
-                     f"<span style=color:#94a3b8>Отдельный поток — в «оплата без заявки» не считаются.</span></div>")
-        # реестр заявок: два сигнала — стадия Bitrix × оплата 1С + ссылка на карточку
-        _bx_badge = {"success": "<span class='pill ok'>Bitrix: Успешно</span>",
-                     "fail": "<span class='pill pr'>Bitrix: Отказано</span>",
-                     "progress": "<span class='pill py'>Bitrix: в работе</span>"}
-        zrows = ""
-        for zid, num, comp, sup, amt, m, sk in sorted(rec['z_list'], key=lambda x: -(x[4] or 0))[:30]:
-            no = f"№{num}"
-            cell = (f"<a href='{BX_PORTAL}/crm/type/{BX_ENTITY}/details/{zid}/' target=_blank>{no}</a>"
-                    if BX_PORTAL and zid else no)
-            pay = ("<span class='pill ok'>✅ 1С: оплачено</span>" if m
-                   else "<span class='pill wait'>⏳ 1С: нет</span>")
-            zrows += (f"<tr><td>{cell}</td><td>{comp or '—'}</td><td>{sup or '—'}</td>"
-                      f"<td class=num>{money(amt)}</td><td>{_bx_badge.get(sk,'')} {pay}</td></tr>")
-        # сматчено по компаниям
-        bcrows = ""
-        for co, d in sorted(rec['by_company'].items(), key=lambda x: -x[1][1]):
-            pct = (100 * d[0] / d[1]) if d[1] else 0
-            bcrows += (f"<tr><td>{co or '—'}</td><td class=num>{d[0]}</td><td class=num>{d[1]}</td>"
-                       f"<td class=num>{pct:.0f}%</td></tr>")
-        # оплата без заявки — платёж есть, № не найден среди заявок Bitrix.
-        # Сначала «нигде нет» (реальные подозрительные), потом объяснимые через реестр.
-        nzsorted = sorted(rec['pay_no_zayavka'], key=lambda x: (1 if x[6] else 0, -x[3]))
-        nz = ""
-        for zn, co, nm, a, d, cand, hit in nzsorted[:20]:
-            if hit:
-                by, rnum, rname = hit
-                reestr_cell = (f"<span class='pill ok'>реестр: {by} №{rnum}</span>"
-                               + (f" <span style=color:#94a3b8>{rname[:26]}</span>" if rname else ""))
-            else:
-                reestr_cell = "<span class='pill pr'>нигде нет</span>"
-            if cand and BX_PORTAL:
-                hint = f"<a href='{BX_PORTAL}/crm/type/{BX_ENTITY}/details/{cand[0]}/' target=_blank>№{cand[1]}</a>"
-            elif cand:
-                hint = f"№{cand[1]}"
-            else:
-                hint = "<span style=color:#94a3b8>—</span>"
-            nz += (f"<tr><td>{co}</td><td>{nm}</td><td class='num neg'>{money(a)}</td>"
-                   f"<td>{d}</td><td>№{zn}</td><td>{reestr_cell}</td><td>{hint}</td></tr>")
-        nz = nz or "<tr><td colspan=7 style=color:#94a3b8>нет</td></tr>"
-        svedenie = (f"<div class=svh><h2>Сведение: заявки Bitrix ↔ платежи 1С</h2>"
-                    f"<div class=svmeta>окно: {BX_MONTHS} мес · заявок из Bitrix: {rec['z_total']} · синхр.: {bx_sync} &nbsp; {refresh_btn}</div></div>"
-                    f"<div class='svet wide' style='margin-bottom:10px'>{sv2}</div>"
-                    f"{cash_line}"
-                    f"<div class=card><table><thead><tr><th>Заявка</th><th>Компания</th><th>Поставщик</th><th class=num>Сумма</th><th>Статус</th></tr></thead>"
-                    f"<tbody>{zrows}</tbody></table>"
-                    f"<div class=note>Клик по № открывает карточку в Bitrix. Показаны 30 из {rec['z_total']} — остальное проверяй в Bitrix напрямую по ссылке.</div></div>"
-                    f"<h2>Сматчено по компаниям</h2>"
-                    f"<div class=card><table><thead><tr><th>Компания</th><th class=num>Оплачено</th><th class=num>Всего заявок</th><th class=num>%</th></tr></thead>"
-                    f"<tbody>{bcrows}</tbody></table><div class=note>Сколько заявок компании уже прошли оплату по 1С.</div></div>"
-                    f"<h2>🔴 Оплата без заявки в Bitrix</h2>"
-                    f"<div class=cashln style='background:#f0f9ff;border-color:#bae6fd;color:#0c4a6e'>"
-                    f"Из {len(rec['pay_no_zayavka'])} платежей без заявки Bitrix: <b>{rec['nz_in_reestr']}</b> нашлись в реестре финотдела "
-                    f"(по № или БИН), <b>{rec['nz_orphan']}</b> — нигде нет (это и есть реальные кандидаты на проверку). "
-                    f"<span style=color:#94a3b8>Реестр: {rec['reestr_rows']} строк.</span></div>"
-                    f"<div class=card><table><thead><tr><th>Компания</th><th>Поставщик</th><th class=num>Сумма</th><th>Дата</th><th>№ в назначении</th><th>Реестр финотдела</th><th>Заявка по поставщику</th></tr></thead>"
-                    f"<tbody>{nz}</tbody></table>"
-                    f"<div class=note>«Нигде нет» = ни в Bitrix, ни в реестре финотдела → проверить в первую очередь. «Реестр: № / БИН» = платёж есть в ручном реестре (легитимен, просто нет заявки Bitrix).</div></div>")
-    else:
-        svedenie = (f"<div class=note style='margin-top:14px'>Заявки Bitrix ещё не подгружены. "
-                    f"{refresh_btn} — один раз, чтобы включить сведение.</div>")
-
-    return f"""<!doctype html><html lang=ru><head><meta charset=utf-8><title>ATAMŪRA · Финансы</title><style>{CSS}</style></head><body>
-<div class=top><b>◎ ATAMŪRA · Финансы</b><div class=s>Свод по холдингу · срез: {meta.get('ts','—')} · за {meta.get('months','?')} мес</div></div>
-<div class=wrap>
-  <div class=kpis>{kpis}</div>
-  <h2>Движение денег по дням (отток / приток)</h2>
-  <div class=card>{chart_block}</div>
-  <div class=svet>{svet}</div>
-  {svedenie}
-  <h2>Отток по дочкам</h2>
-  <div class=card>{oborot}
-    <div class=note>Доля оттока по компаниям (топ-7 + прочее). Наведи на сектор — сумма и %.</div></div>
-  <h2>Разрез по типу расхода</h2>
-  <div class=card>{cat_donut}
-    <div class=note>Эвристика по назначению платежа: подряд (работы/СМР) · поставка (материалы/товар) · услуга (аренда/обслуживание/налоги). Ключевые слова можно уточнять.</div></div>
-  <h2>Топ поставщиков по оплате</h2>
-  <div class=card><div class=bars>{top_bars}</div></div>
-  <h2>🔴 Кандидаты в дубли (оплаты поставщикам)</h2>
-  <div class=card><table><thead><tr><th>Компания</th><th>Поставщик</th><th class=num>Сумма</th><th>Дата</th><th class=num>Платежей</th></tr></thead><tbody>{dub_rows}</tbody></table>
-    <div class=note>Один БИН + сумма + дата в одной компании — проверить перед/после оплаты.</div></div>
-  <h2>⚠ Расхождения: поступило vs оплачено</h2>
-  <div class=card><table><thead><tr><th>Компания</th><th>Подрядчик</th><th class=num>Поступило</th><th class=num>Оплачено</th><th class=num>Δ</th><th></th></tr></thead><tbody>{disc_rows}</tbody></table>
-    <div class=note>Сырой сигнал — без договора не вердикт (аванс/бартер/удержания).</div></div>
-  <div class=note>Данные из 1С (OData) → парсер → этот сервер. Дальше: платёжный календарь + сведение с Bitrix-заявками.</div>
-</div><div id=cftip class=cftip></div></body></html>"""
+    """Лёгкая оболочка SPA: тянет данные с /data.json и рендерит вкладки на клиенте."""
+    return (f"<!doctype html><html lang=ru><head><meta charset=utf-8>"
+            f"<meta name=viewport content='width=device-width,initial-scale=1'>"
+            f"<title>ATAMŪRA · Финансы</title><style>{CSS}</style></head><body>"
+            f"<div id=app class=loading>Загрузка данных…</div>"
+            f"<div id=cftip class=cftip></div>"
+            f"<script>{APP_JS}</script></body></html>")
 
 
 def data_json():
@@ -629,6 +673,9 @@ class H(http.server.BaseHTTPRequestHandler):
         if self.path == "/healthz": self._send("ok", "text/plain")
         elif self.path == "/sync":
             try: self._send(json.dumps(sync_bitrix(), ensure_ascii=False), "application/json")
+            except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
+        elif self.path == "/sync-full":
+            try: self._send(json.dumps(sync_bitrix_full(), ensure_ascii=False), "application/json")
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path == "/refresh":
             try:
