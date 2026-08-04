@@ -461,6 +461,19 @@ td a{color:#0e7490;font-weight:700;text-decoration:none}td a:hover{text-decorati
 .sorth{cursor:pointer;user-select:none}.sorth:hover{background:#e2e8f0}
 .tg{font-size:10px;padding:2px 7px;border-radius:5px;font-weight:600;white-space:nowrap}
 .t-подряд{background:#cffafe;color:#0e7490}.t-поставка{background:#ffedd5;color:#c2410c}.t-услуга{background:#ede9fe;color:#6d28d9}.t-прочее{background:#f1f5f9;color:#64748b}
+.modal-ov{position:fixed;inset:0;background:rgba(15,34,51,.55);z-index:80;display:flex;align-items:flex-start;justify-content:center;padding:32px 16px;overflow:auto}
+.modal-box{position:relative;background:#fff;border-radius:14px;max-width:900px;width:100%;padding:0 0 16px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+.modal-x{position:absolute;top:10px;right:12px;background:none;border:0;font-size:18px;color:#94a3b8;cursor:pointer;z-index:1}
+.modal-box h4{font-size:13px;margin:16px 16px 8px}
+.nkhd{background:#0f2233;color:#e2e8f0;border-radius:14px 14px 0 0;padding:16px 20px}
+.nkhd .t{font-size:18px;font-weight:800}.nkhd .s{font-size:12px;color:#94a3b8;margin-top:4px}
+.nkstrip{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;padding:14px 16px}
+.nktile{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px}
+.nktile .l{font-size:9.5px;text-transform:uppercase;color:#64748b}.nktile .vv{font-size:15px;font-weight:800;margin-top:4px;font-variant-numeric:tabular-nums}
+.nktile.f .vv{color:#0e7490}.nktile.r .vv{color:#c2410c}
+.nksec{margin:0 16px;padding:11px 14px;background:#f8fafc;border:1px solid #eef2f7;border-radius:10px;font-size:12.5px}
+.nknote{color:#64748b;margin-top:6px;font-size:12px}
+.modal-box .tblscroll{margin:0 16px;border-radius:10px}
 """
 
 # JS линейного графика cashflow (данные приходят в window.CF). Вынесено из f-строки (много {}).
@@ -558,8 +571,38 @@ function dataTable(rows,cols,opts){
       r.slice(0,lim).map(function(x){return '<tr>'+cols.map(function(c){return '<td class="'+(c.num?'num':'')+'">'+(c.render?c.render(x):esc(x[c.key]))+'</td>';}).join('')+'</tr>';}).join('')+'</tbody>';
     summary.textContent='Показано '+Math.min(lim,r.length)+' из '+r.length+(opts.sumKey?(' · Σ '+money(r.reduce(function(s,x){return s+(x[opts.sumKey]||0);},0))+' ₸'):'');
     tbl.querySelectorAll('.sorth').forEach(function(th){th.onclick=function(){var k=th.dataset.k;if(state.sort==k)state.dir=-state.dir;else{state.sort=k;state.dir=-1;}draw();};});
+    if(opts.onRow){var shown=r.slice(0,lim);tbl.querySelectorAll('tbody tr').forEach(function(tr,i){tr.style.cursor='pointer';tr.onclick=function(){opts.onRow(shown[i]);};});}
   }
   draw();return wrap;
+}
+
+function openModal(inner){
+  var ov=el('div','modal-ov');ov.onclick=function(e){if(e.target===ov)document.body.removeChild(ov);};
+  var box=el('div','modal-box');box.innerHTML='<button class=modal-x>✕</button>'+inner;
+  box.querySelector('.modal-x').onclick=function(){document.body.removeChild(ov);};
+  ov.appendChild(box);document.body.appendChild(ov);
+}
+
+function openNkCard(x, amap, portal, ent){
+  var ad=(amap&&amap[x.bin])||{};
+  var bxlink=(portal&&x.id)?('<a href="'+portal+'/crm/type/'+ent+'/details/'+x.id+'/" target=_blank>открыть в Bitrix →</a>'):'';
+  function tile(l,vv,cls){return '<div class="nktile '+(cls||'')+'"><div class=l>'+l+'</div><div class=vv>'+vv+'</div></div>';}
+  var strip=tile('Договор',money(x.total)+' ₸')+tile('Аванс',money(x.avans)+' ₸')+
+    tile('Удержание '+(x.retention_pct||0)+'%',money(x.retention)+' ₸')+
+    tile('Бартер',x.barter?(x.barter_sum?money(x.barter_sum)+' ₸':'да'):'нет')+
+    tile('Оплачено 1С',money(x.fact)+' ₸','f')+tile('Остаток',money(x.ostatok)+' ₸','r');
+  var pr=(x.payments||[]).slice().sort(function(a,b){return (a.date||'').localeCompare(b.date||'');})
+    .map(function(p){return '<tr><td>'+esc(p.date||'')+'</td><td>'+esc(p.object||'—')+'</td><td>'+esc(p.account||'—')+'</td><td>'+esc((p.purpose||'').slice(0,60))+'</td><td class=num>'+money(p.amount)+'</td></tr>';}).join('')
+    || '<tr><td colspan=5 style=color:#94a3b8>нет оплат 1С по этой заявке</td></tr>';
+  var cl=(ad.checklist||[]).map(function(i){return '<tr><td>'+i.n+'. '+esc(i.name)+' <span style=color:#94a3b8>· '+esc(i.dep)+'</span></td><td>'+esc(i.status)+'</td></tr>';}).join('');
+  var html='<div class=nkhd><div class=t>'+esc(x.supplier||ad.short||'—')+'</div>'
+    +'<div class=s>БИН '+esc(x.bin||'—')+(ad.iin?(' · ИИН '+esc(ad.iin)):'')+(ad.director?(' · '+esc(ad.director)):'')+(ad.oked?(' · '+esc(ad.oked)):'')+'</div></div>'
+    +'<div class=nkstrip>'+strip+'</div>'
+    +'<div class=nksec><b>Заявка №'+esc(x.num)+' · Договор '+esc(x.contract_no||'—')+'</b> '+esc(x.date||'')+' · '+esc(x.object||'')+(x.ochered?(' · '+esc(x.ochered)):'')+' &nbsp; '+bxlink
+    +(x.notes?('<div class=nknote>📄 '+esc(x.notes)+'</div>'):'')+'</div>'
+    +'<h4>Оплаты 1С по заявке</h4><div class=tblscroll style="max-height:30vh"><table><thead><tr><th>Дата</th><th>Объект</th><th>Счёт</th><th>Назначение</th><th class=num>Сумма</th></tr></thead><tbody>'+pr+'</tbody></table></div>'
+    +(cl?('<h4>Проверка контрагента (Adata)</h4><div class=tblscroll style="max-height:34vh"><table><tbody>'+cl+'</tbody></table></div>'):'<div class=note>Adata по этому БИН ещё не подгружена.</div>');
+  openModal(html);
 }
 
 function donutSVG(pairs,colors){
@@ -722,9 +765,10 @@ function rNk(v){
       {key:'ostatok',label:'Остаток',num:true,render:function(x){return '<b>'+money(x.ostatok)+'</b>';}}
     ];
     host.appendChild(card(dataTable(rows,cols,{filters:[fObj,fB],sort:'total',dir:-1,
+      onRow:function(x){openNkCard(x, nd.adata, nd.bx_portal, nd.bx_entity);},
       searchText:function(x){return x.num+' '+x.supplier+' '+(x.contract_no||'')+' '+(x.object||'')+' '+(x.notes||'');},
       searchPlaceholder:'поиск: №, поставщик, договор, объект…',limit:1000})));
-    host.appendChild(el('div','note','Условия прочитаны ИИ из PDF/сканов договоров (claude -p). Остаток = Договор − Аванс − Удержание − Бартер − Оплачено(1С). Наведи на строку — в поиске ищется и по примечанию ИИ.'));
+    host.appendChild(el('div','note','👆 Клик по строке — полная карточка заявки (договор + оплаты 1С + Adata). Остаток = Договор − Аванс − Удержание − Бартер − Оплачено(1С).'));
   }).catch(function(e){host.innerHTML='<div class=err>Ошибка загрузки накопителя: '+e+'</div>';});
 }
 
@@ -784,32 +828,65 @@ def data_json():
 
 
 def nakopitel_data():
-    """Накопитель: договоры (условия из ИИ) × факт 1С (по № заявки) → остаток, по подрядчикам."""
+    """Накопитель: договоры (условия ИИ) × факт 1С (по № заявки) → остаток + детали для drill."""
     c = _db()
     nk = c.execute("""SELECT num,bin,contract_no,contract_date,total,avans_sum,retention_pct,
                       retention_sum,barter,barter_sum,object,ochered,account,notes,title
                       FROM nakopitel""").fetchall()
-    ad = dict(c.execute("SELECT bin,short FROM adata_cache").fetchall())
-    pays = c.execute("SELECT purpose,amount FROM flow WHERE kind='out' AND supplier=1").fetchall()
+    ashort = dict(c.execute("SELECT bin,short FROM adata_cache").fetchall())
+    acache = dict(c.execute("SELECT bin,json FROM adata_cache").fetchall())
+    idx = dict(c.execute("SELECT num,id FROM zayavka_idx").fetchall())
+    pays = c.execute("SELECT date,amount,purpose FROM flow WHERE kind='out' AND supplier=1").fetchall()
     c.close()
     fact_by_num = defaultdict(float)
-    for purpose, amt in pays:
+    pay_by_num = defaultdict(list)
+    for date, amt, purpose in pays:
         n = _num_from(purpose)
         if n:
             fact_by_num[n] += amt or 0
-    rows = []
+            pay_by_num[n].append({"date": date, "amount": amt, "account": _account_from(purpose),
+                                  "object": _object_from(purpose), "purpose": (purpose or "")[:100]})
+    rows, bins = [], set()
     for (num, bin_, cno, cdate, total, avans, rpct, rsum, barter, bsum, obj, och, acc, notes, title) in nk:
         fact = fact_by_num.get(num, 0.0)
-        supplier = ad.get(bin_) or ""
+        supplier = ashort.get(bin_) or ""
         if not supplier and title:
             parts = [p.strip() for p in title.split("/")]
             supplier = parts[2] if len(parts) > 2 else ""
-        rows.append({"num": num, "bin": bin_, "contract_no": cno, "date": cdate,
+        if bin_:
+            bins.add(bin_)
+        rows.append({"num": num, "bin": bin_, "id": idx.get(num), "contract_no": cno, "date": cdate,
                      "total": total, "avans": avans, "retention_pct": rpct, "retention": rsum,
                      "barter": bool(barter), "barter_sum": bsum, "object": obj, "ochered": och,
                      "account": acc, "notes": notes, "supplier": supplier, "fact": fact,
-                     "ostatok": total - avans - rsum - bsum - fact})
-    return {"rows": rows, "count": len(rows)}
+                     "ostatok": total - avans - rsum - bsum - fact,
+                     "payments": pay_by_num.get(num, [])})
+    # карточки Adata (basic + 10-пунктовый чеклист) только для нужных БИН
+    try:
+        import adata as _A
+    except Exception:
+        _A = None
+    amap = {}
+    for b in bins:
+        j = acache.get(b)
+        if not j:
+            continue
+        try:
+            info = json.loads(j)
+        except Exception:
+            continue
+        basic = info.get("basic", {})
+        cl = []
+        if _A:
+            try:
+                cl = [{"n": n, "name": nm, "status": st, "dep": dp}
+                      for n, nm, st, dp in _A.render_checklist(info)]
+            except Exception:
+                cl = []
+        amap[b] = {"short": basic.get("short_name", ""), "oked": basic.get("oked", ""),
+                   "director": basic.get("fullname_director", ""), "iin": basic.get("biin", ""),
+                   "nds": bool(basic.get("is_nds_payer")), "checklist": cl}
+    return {"rows": rows, "count": len(rows), "adata": amap, "bx_portal": BX_PORTAL, "bx_entity": BX_ENTITY}
 
 
 class H(http.server.BaseHTTPRequestHandler):
