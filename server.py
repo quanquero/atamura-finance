@@ -34,6 +34,13 @@ def _db():
     c.execute("""CREATE TABLE IF NOT EXISTS reestr(
         src TEXT, num TEXT, name TEXT, bin TEXT, iban TEXT, amount REAL, purpose TEXT, invoice TEXT)""")
     c.execute("CREATE TABLE IF NOT EXISTS zayavka_idx(num TEXT PRIMARY KEY, id INTEGER)")
+    # накопитель: условия договора, прочитанные ИИ из PDF (кеш — договор не меняется)
+    c.execute("""CREATE TABLE IF NOT EXISTS nakopitel(
+        num TEXT PRIMARY KEY, bin TEXT, contract_no TEXT, contract_date TEXT,
+        total REAL, avans_sum REAL, retention_pct REAL, retention_sum REAL,
+        barter INT, barter_sum REAL, object TEXT, ochered TEXT, account TEXT,
+        notes TEXT, title TEXT, read_ts TEXT)""")
+    c.execute("CREATE TABLE IF NOT EXISTS adata_cache(bin TEXT PRIMARY KEY, short TEXT, json TEXT, ts TEXT)")
     # миграция: старая zayavka без company (создана прошлой версией)
     zcols = {r[1] for r in c.execute("PRAGMA table_info(zayavka)").fetchall()}
     if "company" not in zcols:
@@ -339,6 +346,31 @@ def store_reestr(payload):
               (payload.get("ts", ""),))
     c.commit(); n = len(rows); c.close()
     return n
+
+
+def store_nakopitel(num, bin_, terms, title=""):
+    """Сохранить условия договора (прочитанные ИИ) в кеш накопителя."""
+    t = terms or {}
+    acc = t.get("account") or _account_from(t.get("notes", ""))
+    c = _db()
+    c.execute("INSERT OR REPLACE INTO nakopitel VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+        str(num), str(bin_ or ""), t.get("contract_no", ""), t.get("contract_date", ""),
+        float(t.get("total") or 0), float(t.get("avans_sum") or 0),
+        float(t.get("retention_pct") or 0), float(t.get("retention_sum") or 0),
+        1 if t.get("barter") else 0, float(t.get("barter_sum") or 0),
+        t.get("object", ""), t.get("ochered", ""), acc, t.get("notes", ""), title,
+        datetime.now().strftime("%Y-%m-%d %H:%M")))
+    c.commit(); c.close()
+
+
+def store_adata(bin_, data):
+    """Кешировать справку Adata по БИН (читаем один раз)."""
+    short = (data or {}).get("basic", {}).get("short_name", "")
+    c = _db()
+    c.execute("INSERT OR REPLACE INTO adata_cache VALUES(?,?,?,?)",
+              (str(bin_), short, json.dumps(data, ensure_ascii=False),
+               datetime.now().strftime("%Y-%m-%d %H:%M")))
+    c.commit(); c.close()
 
 
 def money(n):
