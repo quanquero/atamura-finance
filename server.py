@@ -136,9 +136,35 @@ def sync_bitrix_full():
 
 
 def _num_from(s):
-    """Вытащить № заявки (15xxx–16xxx…) из текста."""
-    m = re.search(r"№\s*(\d{4,6})", str(s or "")) or re.search(r"\b(1[0-9]{4})\b", str(s or ""))
+    """№ заявки (1xxxx) из назначения 1С. Игнорирует № счёта (сч№0230000…):
+    берёт число сразу после «Референс <реф>», либо любое 5-значное 1xxxx."""
+    s = str(s or "")
+    m = re.search(r"Референс\s+\d{6,}\s+(1\d{4})\b", s)     # надёжно: заявка сразу после реф
+    if m:
+        return m.group(1)
+    m = re.search(r"\b(1\d{4})\b", s)                        # 5-значный № заявки (не № счёта 0…, не реф 10 цифр)
+    if m:
+        return m.group(1)
+    m = re.search(r"№\s*(\d{4,6})", s)                       # запасной, но не № счёта (ведущий 0)
+    if m and not m.group(1).startswith("0"):
+        return m.group(1)
+    return ""
+
+
+def _account_from(s):
+    """№ счёта из назначения (сч№0230000…) — ключ привязки платёж → справка/договор."""
+    m = re.search(r"сч[.№\s]*?(0\d{6,10})", str(s or ""))
     return m.group(1) if m else ""
+
+
+def _object_from(s):
+    """Объект/ЖК из назначения платежа (эвристика по AU/Атмо/KR/Аксай)."""
+    t = str(s or "").lower()
+    if "атмо" in t: return "Атмосфера"
+    if "aura" in t or re.search(r"\bau\s*\d|аура", t): return "Аура"
+    if "керуен" in t or re.search(r"\bkr\s*\d|keruen", t): return "Керуен"
+    if "аксай" in t or "aksai" in t: return "Аксай"
+    return ""
 
 
 _ORG_WORDS = ("товарищество с ограниченной ответственностью", "тоо", "ип", "ао", "оао",
@@ -566,6 +592,8 @@ function rObzor(v){
 function rPay(v){
   var companies=Object.keys(D.payments.reduce(function(a,p){a[p.company]=1;return a;},{})).sort();
   var fCo=selectFilter('Компания','company',companies);
+  var objs=Object.keys(D.payments.reduce(function(a,p){if(p.obj)a[p.obj]=1;return a;},{})).sort();
+  var fObj=selectFilter('Объект','obj',objs);
   var fCat=selectFilter('Тип','cat',['подряд','поставка','услуга','прочее']);
   var cb=el('label','cbf','<input type=checkbox> только наличные');var chk=cb.querySelector('input');
   var fCash={node:cb,test:function(x){return !chk.checked||x.cash;}};chk.addEventListener('change',function(){});
@@ -574,12 +602,13 @@ function rPay(v){
     {key:'company',label:'Компания'},
     {key:'name',label:'Поставщик'},
     {key:'num',label:'№',render:function(x){return x.num?('№'+x.num):'<span style=color:#cbd5e1>—</span>';}},
+    {key:'obj',label:'Объект',render:function(x){return x.obj||'<span style=color:#cbd5e1>—</span>';}},
     {key:'cat',label:'Тип',render:function(x){return '<span class="tg t-'+x.cat+'">'+x.cat+'</span>';}},
     {key:'purpose',label:'Назначение',render:function(x){return '<span title="'+esc(x.purpose)+'">'+esc((x.purpose||'').slice(0,52))+'</span>';}},
     {key:'amount',label:'Сумма',num:true,render:function(x){return money(x.amount)+(x.cash?' 💵':'');}}
   ];
   v.appendChild(h2('Все платежи 1С'));
-  v.appendChild(card(dataTable(D.payments,cols,{filters:[fCo,fCat,fCash],sort:'amount',dir:-1,sumKey:'amount',
+  v.appendChild(card(dataTable(D.payments,cols,{filters:[fCo,fObj,fCat,fCash],sort:'amount',dir:-1,sumKey:'amount',
     searchText:function(x){return x.name+' '+x.purpose+' '+x.num+' '+x.company;},searchPlaceholder:'поиск: поставщик, назначение, №…',limit:1500})));
 }
 
@@ -647,6 +676,7 @@ def data_json():
     rc = [r for r in flow if r[1] == "receipt"]; sup = [r for r in out if r[7] == 1]
     payments = [{"company": r[0], "date": r[2], "bin": r[3], "name": r[4], "amount": r[5],
                  "vidop": r[6], "num": _num_from(r[9]), "purpose": r[9], "doc": r[11],
+                 "acct": _account_from(r[9]), "obj": _object_from(r[9]),
                  "cat": _category(r[9], r[10], r[4], r[6]),
                  "cash": "кассов" in (r[11] or "").lower()} for r in sup]
     orphans = [{"num": x[0], "company": x[1], "name": x[2], "amount": x[3], "date": x[4],
