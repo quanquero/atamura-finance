@@ -12,6 +12,22 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_env_file():
+    """Подтянуть .env фин.блока в окружение (для запусков из шелла: батч/инструменты).
+    setdefault — systemd-переменные имеют приоритет, не перетираем."""
+    p = os.path.join(HERE, ".env")
+    if os.path.exists(p):
+        for line in open(p, encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
+
+
+_load_env_file()
+
 DB   = os.path.join(HERE, "finance_core.sqlite3")
 PORT = int(os.environ.get("PORT", "8013"))
 HOST = os.environ.get("HOST", "127.0.0.1")
