@@ -45,7 +45,10 @@ def main():
     if not server.BITRIX:
         print("BITRIX_WEBHOOK не задан"); return
     nums = active_nums()
-    done = _read_set("nakopitel")
+    # «готово» — только успешно прочитанные (есть № договора или сумма); ошибки повторяем
+    c = server._db()
+    done = {r[0] for r in c.execute("SELECT num FROM nakopitel WHERE contract_no!='' OR total>0").fetchall()}
+    c.close()
     adone = _read_set("adata_cache", "bin")
     print(f"Активных заявок: {len(nums)} · уже прочитано: {len(done)} · читаю до {limit} новых", file=sys.stderr)
     processed = 0

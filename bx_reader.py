@@ -123,11 +123,29 @@ def _xlsx_text(path):
 
 
 def _extract_json(text):
-    m = re.search(r"\{.*\}", text or "", re.S)
-    try:
-        return json.loads(m.group(0)) if m else None
-    except Exception:
+    """Выцепить JSON: снять ```-заборы, взять последнюю сбалансированную {…}."""
+    if not text:
         return None
+    t = re.sub(r"```(?:json)?", "", text)
+    depth, start, best = 0, -1, None
+    for i, ch in enumerate(t):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    best = t[start:i + 1]
+    for cand in (best, t):
+        if not cand:
+            continue
+        try:
+            return json.loads(cand)
+        except Exception:
+            pass
+    return None
 
 
 def read_docs(paths, instruction, schema_hint):
@@ -155,15 +173,25 @@ def read_docs(paths, instruction, schema_hint):
     env.pop("ANTHROPIC_API_KEY", None)   # иначе claude берёт API-ключ вместо OAuth и падает
     if not (env.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip():
         env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
-    cmd = [cli, "-p", "--allowed-tools", "Read"]
+    cmd = [cli, "-p", "--output-format", "json", "--allowed-tools", "Read"]
     for d in dirs:
         cmd += ["--add-dir", d]
     try:
         r = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
-                           timeout=300, encoding="utf-8", errors="replace", env=env)
-        return _extract_json(r.stdout) or {"error": "не распознал JSON", "raw": (r.stdout or "")[:300]}
+                           timeout=420, encoding="utf-8", errors="replace", env=env)
     except Exception as e:
         return {"error": str(e)}
+    text = r.stdout or ""
+    try:                                   # --output-format json → конверт {type:result, result:"…"}
+        envj = json.loads(text)
+        if isinstance(envj, dict) and "result" in envj:
+            text = envj.get("result") or ""
+    except Exception:
+        pass
+    j = _extract_json(text)
+    if j:
+        return j
+    return {"error": "не распознал JSON", "raw": (text or r.stderr or "")[:800]}
 
 
 # схема условий накопителя (что достаём из договора/КП)
