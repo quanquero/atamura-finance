@@ -47,13 +47,14 @@ def main():
     else:
         terms = {"error": "нет вложений в заявке"}
 
-    # Adata по БИН из карточки (double-поле) — если есть
-    bin_ = ""
-    for k, v in item.items():
-        s = str(v)
-        m = __import__("re").search(r"\b(\d{12})\b", s)
-        if m and k.lower().startswith("ufcrm") and len(s) < 20:
-            bin_ = m.group(1); break
+    # Adata по БИН: 2-й аргумент, иначе авто-поиск 12-значного в полях/названии
+    import re as _re
+    bin_ = sys.argv[2] if len(sys.argv) > 2 else ""
+    if not bin_:
+        for v in list(item.values()) + [title]:
+            m = _re.search(r"\b(\d{12})\b", str(v))
+            if m:
+                bin_ = m.group(1); break
     adata_card = None
     if A and bin_:
         try:
