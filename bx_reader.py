@@ -180,7 +180,7 @@ def read_docs(paths, instruction, schema_hint):
         cmd += ["--add-dir", d]
     try:
         r = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
-                           timeout=420, encoding="utf-8", errors="replace", env=env)
+                           timeout=600, encoding="utf-8", errors="replace", env=env)
     except Exception as e:
         return {"error": str(e)}
     text = r.stdout or ""

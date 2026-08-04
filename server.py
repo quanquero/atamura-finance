@@ -513,7 +513,7 @@ function money(n){return (Math.round(n||0)).toLocaleString('ru-RU').replace(/,/g
 function el(t,c,h){var e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;}
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');}
 var D=null, tab='obzor';
-var TABS=[['obzor','Обзор'],['pay','Платежи 1С'],['sved','Сведение'],['ctrl','Контроль']];
+var TABS=[['obzor','Обзор'],['pay','Платежи 1С'],['sved','Сведение'],['nk','Накопитель'],['ctrl','Контроль']];
 
 fetch('data.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){D=d;boot();})
   .catch(function(e){app.className='';app.innerHTML='<div class=wrap><div class=err>Ошибка загрузки данных: '+e+'</div></div>';});
@@ -530,7 +530,7 @@ function boot(){
   var v=el('div','wrap');v.id='view';app.appendChild(v);
   render();
 }
-function render(){var v=document.getElementById('view');v.innerHTML='';({obzor:rObzor,pay:rPay,sved:rSved,ctrl:rCtrl}[tab])(v);}
+function render(){var v=document.getElementById('view');v.innerHTML='';({obzor:rObzor,pay:rPay,sved:rSved,nk:rNk,ctrl:rCtrl}[tab])(v);}
 
 function card(inner){var c=el('div','card');if(typeof inner=='string')c.innerHTML=inner;else c.appendChild(inner);return c;}
 function h2(t){return el('h2',null,t);}
@@ -691,6 +691,43 @@ function rSved(v){
     searchText:function(o){return o.num+' '+o.name+' '+o.company;},searchPlaceholder:'поиск: №, поставщик, компания…',limit:1500})));
 }
 
+function rNk(v){
+  v.appendChild(h2('Накопитель — обязательства по договорам'));
+  var host=el('div');host.innerHTML='<div class=note>Загрузка накопителя…</div>';v.appendChild(host);
+  fetch('nakopitel.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(nd){
+    host.innerHTML='';
+    var rows=(nd&&nd.rows)||[];
+    if(!rows.length){host.innerHTML='<div class=cashln>Договоры ещё не прочитаны. На сервере: <b>python3 tools/nakopitel_batch.py 5</b> — и обнови страницу.</div>';return;}
+    var sT=0,sF=0,sO=0,sR=0,nb=0;
+    rows.forEach(function(x){sT+=x.total;sF+=x.fact;sO+=x.ostatok;sR+=x.retention;if(x.barter)nb++;});
+    var strip=el('div','svet wide');
+    function tile(cls,val,lbl){return '<div class="sv '+cls+'"><div class=n style="font-size:17px">'+val+'</div><div class=l>'+lbl+'</div></div>';}
+    strip.innerHTML=tile('g',rows.length,'Договоров прочитано')+tile('bl',money(sT)+' ₸','Сумма договоров')+
+      tile('g',money(sF)+' ₸','Оплачено (1С)')+tile('y',money(sR)+' ₸','Гар. удержание')+
+      tile('r',money(sO)+' ₸','Остаток')+tile('nu',nb,'С бартером');
+    host.appendChild(strip);
+    var objs=Object.keys(rows.reduce(function(a,x){if(x.object)a[x.object]=1;return a;},{})).sort();
+    var fObj=selectFilter('Объект','object',objs);
+    var cb=el('label','cbf','<input type=checkbox> только бартер');var chk=cb.querySelector('input');
+    var fB={node:cb,test:function(x){return !chk.checked||x.barter;}};
+    var cols=[
+      {key:'num',label:'Заявка',render:function(x){return '№'+x.num;}},
+      {key:'contract_no',label:'Договор',render:function(x){return esc(x.contract_no||'—');}},
+      {key:'supplier',label:'Поставщик',render:function(x){return esc(x.supplier||'—');}},
+      {key:'object',label:'Объект',render:function(x){return esc(x.object||'—');}},
+      {key:'total',label:'Договор',num:true,render:function(x){return money(x.total);}},
+      {key:'fact',label:'Оплачено',num:true,render:function(x){return money(x.fact);}},
+      {key:'retention',label:'Удерж.',num:true,render:function(x){return x.retention?money(x.retention):'—';}},
+      {key:'barter',label:'Бартер',render:function(x){return x.barter?'<span class="pill py">бартер</span>':'—';}},
+      {key:'ostatok',label:'Остаток',num:true,render:function(x){return '<b>'+money(x.ostatok)+'</b>';}}
+    ];
+    host.appendChild(card(dataTable(rows,cols,{filters:[fObj,fB],sort:'total',dir:-1,
+      searchText:function(x){return x.num+' '+x.supplier+' '+(x.contract_no||'')+' '+(x.object||'')+' '+(x.notes||'');},
+      searchPlaceholder:'поиск: №, поставщик, договор, объект…',limit:1000})));
+    host.appendChild(el('div','note','Условия прочитаны ИИ из PDF/сканов договоров (claude -p). Остаток = Договор − Аванс − Удержание − Бартер − Оплачено(1С). Наведи на строку — в поиске ищется и по примечанию ИИ.'));
+  }).catch(function(e){host.innerHTML='<div class=err>Ошибка загрузки накопителя: '+e+'</div>';});
+}
+
 function rCtrl(v){
   var g={};D.payments.forEach(function(p){if(!p.bin)return;var k=p.company+'|'+p.bin+'|'+Math.round(p.amount)+'|'+p.date;(g[k]=g[k]||[]).push(p);});
   var dub=Object.keys(g).map(function(k){return g[k];}).filter(function(a){return a.length>1;}).map(function(a){return {company:a[0].company,name:a[0].name,bin:a[0].bin,amount:a[0].amount,date:a[0].date,n:a.length};});
@@ -746,6 +783,35 @@ def data_json():
             "bx_portal": BX_PORTAL, "bx_entity": BX_ENTITY}
 
 
+def nakopitel_data():
+    """Накопитель: договоры (условия из ИИ) × факт 1С (по № заявки) → остаток, по подрядчикам."""
+    c = _db()
+    nk = c.execute("""SELECT num,bin,contract_no,contract_date,total,avans_sum,retention_pct,
+                      retention_sum,barter,barter_sum,object,ochered,account,notes,title
+                      FROM nakopitel""").fetchall()
+    ad = dict(c.execute("SELECT bin,short FROM adata_cache").fetchall())
+    pays = c.execute("SELECT purpose,amount FROM flow WHERE kind='out' AND supplier=1").fetchall()
+    c.close()
+    fact_by_num = defaultdict(float)
+    for purpose, amt in pays:
+        n = _num_from(purpose)
+        if n:
+            fact_by_num[n] += amt or 0
+    rows = []
+    for (num, bin_, cno, cdate, total, avans, rpct, rsum, barter, bsum, obj, och, acc, notes, title) in nk:
+        fact = fact_by_num.get(num, 0.0)
+        supplier = ad.get(bin_) or ""
+        if not supplier and title:
+            parts = [p.strip() for p in title.split("/")]
+            supplier = parts[2] if len(parts) > 2 else ""
+        rows.append({"num": num, "bin": bin_, "contract_no": cno, "date": cdate,
+                     "total": total, "avans": avans, "retention_pct": rpct, "retention": rsum,
+                     "barter": bool(barter), "barter_sum": bsum, "object": obj, "ochered": och,
+                     "account": acc, "notes": notes, "supplier": supplier, "fact": fact,
+                     "ostatok": total - avans - rsum - bsum - fact})
+    return {"rows": rows, "count": len(rows)}
+
+
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def _send(self, body, ctype="text/html; charset=utf-8", code=200):
@@ -767,6 +833,9 @@ class H(http.server.BaseHTTPRequestHandler):
             except Exception as e: self._send(f"<pre>Ошибка синхронизации: {e}</pre>", code=500)
         elif self.path == "/data.json":
             try: self._send(json.dumps(data_json(), ensure_ascii=False), "application/json")
+            except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
+        elif self.path == "/nakopitel.json":
+            try: self._send(json.dumps(nakopitel_data(), ensure_ascii=False), "application/json")
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path == "/" or self.path.startswith("/?"):
             try: self._send(dashboard())
