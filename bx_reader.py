@@ -82,8 +82,10 @@ def download(url):
         ext = "pdf"
     elif head[:2] == b"PK":
         ext = "docx" if (b"word/" in data[:6000] or b"word/document" in data) else "xlsx"
-    elif head[:3] == b"\xff\xd8\xff" or head[:8] == b"\x89PNG\r\n\x1a\n":
-        ext = "img"
+    elif head[:3] == b"\xff\xd8\xff":
+        ext = "jpg"                        # Read определяет тип по расширению — даём настоящее
+    elif head[:8] == b"\x89PNG\r\n\x1a\n":
+        ext = "png"
     else:
         ext = "bin"
     p = os.path.join(CACHE, f"{key}.{ext}")
@@ -157,7 +159,7 @@ def read_docs(paths, instruction, schema_hint):
     read_paths, dirs, extra = [], set(), ""
     for p in paths:
         low = p.lower()
-        if low.endswith((".pdf", ".png", ".jpg", ".jpeg", ".img")):
+        if low.endswith((".pdf", ".png", ".jpg", ".jpeg")):
             read_paths.append(p); dirs.add(os.path.dirname(os.path.abspath(p)))
         elif low.endswith(".docx"):
             extra += f"\n[docx {os.path.basename(p)}]\n{_docx_text(p)[:12000]}"
