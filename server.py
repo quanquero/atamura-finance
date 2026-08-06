@@ -7,7 +7,7 @@ ATAMŪRA Finance — веб-ЛК финдира (приёмник + дашбор
 
 Env:  SERVICE_KEY (ключ для /api/ingest),  PORT (по умолч. 8013),  HOST (0.0.0.0 в проде).
 """
-import http.server, json, math, os, re, socketserver, sqlite3, threading, urllib.request, urllib.parse
+import base64, hashlib, hmac, http.server, json, math, os, re, socketserver, sqlite3, threading, urllib.request, urllib.parse
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -37,6 +37,37 @@ BITRIX = os.environ.get("BITRIX_WEBHOOK", "").rstrip("/")
 BX_PORTAL = BITRIX.split("/rest/")[0] if "/rest/" in BITRIX else ""   # для ссылок на карточки заявок
 BX_ENTITY = 178
 BX_MONTHS = int(os.environ.get("BX_MONTHS", "6"))   # окно заявок шире среза 1С: платёж может ссылаться на старую/продлённую заявку
+
+# --- Простой вход логин/пароль (V1.0.0). AUTH_USERS="login:sha256hex;login2:sha256hex" ---
+SESSION_SECRET = os.environ.get("SESSION_SECRET", "") or KEY   # подпись куки сессии
+AUTH_USERS = {}
+for _pair in os.environ.get("AUTH_USERS", "").split(";"):
+    if ":" in _pair:
+        _u, _h = _pair.split(":", 1)
+        AUTH_USERS[_u.strip()] = _h.strip().lower()
+AUTH_ON = bool(AUTH_USERS)                            # нет пользователей → вход выключен (как раньше)
+
+
+def _pw_hash(pw):
+    return hashlib.sha256((pw or "").encode("utf-8")).hexdigest()
+
+
+def _make_session(user, days=7):
+    exp = int(datetime.now(timezone.utc).timestamp()) + days * 86400
+    sig = hmac.new(SESSION_SECRET.encode(), f"{user}|{exp}".encode(), hashlib.sha256).hexdigest()[:32]
+    return base64.urlsafe_b64encode(f"{user}|{exp}|{sig}".encode()).decode()
+
+
+def _check_session(cookie):
+    try:
+        raw = base64.urlsafe_b64decode(cookie.encode()).decode()
+        user, exp, sig = raw.rsplit("|", 2)
+        if int(exp) < int(datetime.now(timezone.utc).timestamp()):
+            return None
+        good = hmac.new(SESSION_SECRET.encode(), f"{user}|{exp}".encode(), hashlib.sha256).hexdigest()[:32]
+        return user if hmac.compare_digest(good, sig) else None
+    except Exception:
+        return None
 
 
 def _db():
@@ -535,7 +566,7 @@ function boot(){
   var m=D.meta||{};
   app.className='';app.innerHTML='';
   var top=el('div','top');
-  top.innerHTML='<b>◎ ATAMŪRA · Финансы</b><div class=s>срез 1С: '+esc(m.ts||'—')+' · за '+esc(m.months||'?')+' мес · Bitrix: '+esc(m.bx_sync||'—')+(m.idx_ts?(' · полный индекс: '+esc(m.idx_ts)):' · <a href="/sync-full" style="color:#7dd3fc">включить полный индекс</a>')+'</div>';
+  top.innerHTML='<a href="/logout" style="float:right;color:#94a3b8;font-size:12px;text-decoration:none">выход ↪</a><b>◎ ATAMŪRA · Финансы</b><div class=s>срез 1С: '+esc(m.ts||'—')+' · за '+esc(m.months||'?')+' мес · Bitrix: '+esc(m.bx_sync||'—')+(m.idx_ts?(' · полный индекс: '+esc(m.idx_ts)):' · <a href="/sync-full" style="color:#7dd3fc">включить полный индекс</a>')+'</div>';
   app.appendChild(top);
   var bar=el('div','tabs');
   TABS.forEach(function(t){var b=el('button','tab'+(t[0]==tab?' on':''),t[1]);b.onclick=function(){tab=t[0];for(var i=0;i<bar.children.length;i++)bar.children[i].classList.toggle('on',TABS[i][0]==tab);render();};bar.appendChild(b);});
@@ -889,14 +920,59 @@ def nakopitel_data():
     return {"rows": rows, "count": len(rows), "adata": amap, "bx_portal": BX_PORTAL, "bx_entity": BX_ENTITY}
 
 
+def login_page(err=""):
+    e = f"<div style='color:#dc2626;font-size:12.5px;margin-bottom:10px'>{err}</div>" if err else ""
+    return (f"<!doctype html><html lang=ru><head><meta charset=utf-8>"
+            f"<meta name=viewport content='width=device-width,initial-scale=1'><title>Вход · ATAMŪRA Финансы</title>"
+            f"<style>{CSS}body{{background:#0f2233;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}}"
+            f".lg{{background:#fff;border-radius:16px;padding:34px 40px;max-width:360px;width:100%}}"
+            f".lg input{{width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:9px;font-size:14px;margin-bottom:10px}}"
+            f".lg button{{width:100%;background:#0e7490;color:#fff;border:0;border-radius:9px;padding:11px;font-size:14px;font-weight:700;cursor:pointer}}</style>"
+            f"</head><body><form class=lg method=post action=/login>"
+            f"<div style='font-size:30px;text-align:center'>◎</div>"
+            f"<h2 style='margin:6px 0 2px;text-align:center'>ATAMŪRA · Финансы</h2>"
+            f"<div style='color:#64748b;font-size:12.5px;text-align:center;margin-bottom:18px'>Вход в финансовое ядро</div>"
+            f"{e}<input name=u placeholder='Логин' autofocus autocomplete=username>"
+            f"<input name=p type=password placeholder='Пароль' autocomplete=current-password>"
+            f"<button>Войти</button></form></body></html>")
+
+
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def _send(self, body, ctype="text/html; charset=utf-8", code=200):
         self.send_response(code); self.send_header("Content-Type", ctype); self.end_headers()
         self.wfile.write(body.encode("utf-8") if isinstance(body, str) else body)
 
+    def _user(self):
+        for part in (self.headers.get("Cookie", "") or "").split(";"):
+            part = part.strip()
+            if part.startswith("fin_sess="):
+                return _check_session(part[len("fin_sess="):])
+        return None
+
+    def _gate(self):
+        """True — пропускаем дальше; False — уже отправили редирект/401 (нет доступа)."""
+        if not AUTH_ON:
+            return True
+        if self.path in ("/healthz", "/login", "/logout") or self.path.startswith("/api/"):
+            return True
+        if self._user():
+            return True
+        if self.path.endswith(".json") or self.path in ("/sync", "/sync-full"):
+            self._send('{"error":"auth required"}', "application/json", 401)
+        else:
+            self.send_response(302); self.send_header("Location", "/login"); self.end_headers()
+        return False
+
     def do_GET(self):
-        if self.path == "/healthz": self._send("ok", "text/plain")
+        if not self._gate():
+            return
+        if self.path == "/login":
+            self._send(login_page())
+        elif self.path == "/logout":
+            self.send_response(302); self.send_header("Location", "/login")
+            self.send_header("Set-Cookie", "fin_sess=; Path=/; Max-Age=0"); self.end_headers()
+        elif self.path == "/healthz": self._send("ok", "text/plain")
         elif self.path == "/sync":
             try: self._send(json.dumps(sync_bitrix(), ensure_ascii=False), "application/json")
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
@@ -920,6 +996,19 @@ class H(http.server.BaseHTTPRequestHandler):
         else: self._send("404", code=404)
 
     def do_POST(self):
+        if self.path == "/login":
+            n = int(self.headers.get("Content-Length", 0))
+            form = urllib.parse.parse_qs(self.rfile.read(n).decode("utf-8"))
+            u = (form.get("u", [""])[0]).strip()
+            p = form.get("p", [""])[0]
+            if AUTH_USERS.get(u) and hmac.compare_digest(AUTH_USERS[u], _pw_hash(p)):
+                self.send_response(302); self.send_header("Location", "/")
+                self.send_header("Set-Cookie",
+                                 f"fin_sess={_make_session(u)}; Path=/; HttpOnly; SameSite=Lax; Max-Age={7*86400}")
+                self.end_headers()
+            else:
+                self._send(login_page("Неверный логин или пароль"), code=401)
+            return
         if self.path not in ("/api/ingest", "/api/reestr"):
             self._send("404", code=404); return
         if self.headers.get("X-Service-Key") != KEY:
