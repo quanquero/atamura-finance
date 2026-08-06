@@ -211,11 +211,11 @@ NAKOPITEL_JSON_SCHEMA = {
         "contract_no": _S, "contract_date": _S, "total": _N, "currency": _S, "nds": _S,
         "avans_pct": _N, "avans_sum": _N, "retention_pct": _N, "retention_sum": _N,
         "barter": {"type": "boolean"}, "barter_sum": _N,
-        "ochered": _S, "object": _S, "account": _S, "notes": _S,
+        "ochered": _S, "object": _S, "account": _S, "bin": _S, "notes": _S,
     },
     "required": ["contract_no", "contract_date", "total", "currency", "nds", "avans_pct",
                  "avans_sum", "retention_pct", "retention_sum", "barter", "barter_sum",
-                 "ochered", "object", "account", "notes"],
+                 "ochered", "object", "account", "bin", "notes"],
     "additionalProperties": False,
 }
 NAKOPITEL_SCHEMA = NAKOPITEL_JSON_SCHEMA   # совместимость со старым импортом
@@ -223,5 +223,7 @@ NAKOPITEL_INSTRUCTION = (
     "Ты финансовый контролёр стройхолдинга (Казахстан). Перед тобой договор подряда/поставки и/или КП/счёт. "
     "Извлеки: № и дату договора; total = сумма ИМЕННО ЭТОГО договора/счёта (НЕ накопительный итог по объекту); "
     "валюту и режим НДС; аванс (% и сумму); гарантийное удержание (% и сумму); бартер (есть/нет и сумму); "
-    "очередь/блок; объект (ЖК); account = № счёта/акта, если указан. "
+    "очередь/блок; объект (ЖК); account = № счёта/акта, если указан; "
+    "bin = БИН/ИИН контрагента-подрядчика/поставщика (ровно 12 цифр из реквизитов сторон; "
+    "НЕ ИИК/IBAN 'KZ…' и НЕ БИК). "
     "В notes — важные условия и оговорки одной строкой. Чего нет — ставь 0 или пустую строку.")

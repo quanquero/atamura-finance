@@ -454,6 +454,10 @@ def _nk_pipeline(num, bin_override="", progress=None):
         return {"error": "нет вложений в заявке", "num": str(num)}
     P("read", f"ИИ читает договор ({len(paths)} файл.) через Claude API…")
     terms = R.read_docs(paths, R.NAKOPITEL_INSTRUCTION, R.NAKOPITEL_SCHEMA)
+    if not binf:                                   # БИН не нашёлся в заявке — берём из договора (ИИ)
+        bcand = re.sub(r"\D", "", str((terms or {}).get("bin", "")))
+        if len(bcand) == 12:
+            binf = bcand
     P("save", "Сохраняю условия в накопитель…")
     store_nakopitel(num, binf, terms, title)
     adata_ok = False
