@@ -430,25 +430,81 @@ def store_adata(bin_, data):
     c.commit(); c.close()
 
 
-def read_nakopitel(num, bin_override=""):
-    """Прочитать договор заявки через Claude API и сохранить в накопитель (+ Adata по БИН).
-    Дёргается из UI (/nk-read) и переиспользуемо из CLI. Возвращает {ok,num,bin,terms,adata}|{error}."""
-    import nakopitel as NK
-    res = NK.analyze(num, bin_override=bin_override)
-    if res.get("error"):
-        return {"error": res["error"], "num": str(num)}
-    terms = res.get("terms") or {}
-    store_nakopitel(num, res.get("bin", ""), terms, res.get("title", ""))
-    b = res.get("bin", "")
+def _nk_pipeline(num, bin_override="", progress=None):
+    """Общий конвейер накопителя с этапами (progress(stage,msg)): Bitrix → вложения → ИИ →
+    сохранение → Adata. Используется и синхронно (CLI), и в фоновой задаче (UI)."""
+    def P(stage, msg):
+        if progress:
+            progress(stage, msg)
+    import bx_reader as R, nakopitel as NK
+    P("bitrix", "Открываю заявку в Bitrix…")
+    item = R.item_by_num(num)
+    if not item:
+        return {"error": "заявка не найдена в Bitrix", "num": str(num)}
+    title = item.get("title", "")
+    files = R.file_fields(item)
+    P("download", f"Скачиваю вложения ({len(files)})…")
+    paths = []
+    for _, url, _ in files:
+        try: paths.append(R.download(url))
+        except Exception: pass
+    binf = bin_override or NK._find_bin(item, title)
+    if not paths:
+        store_nakopitel(num, binf, {"error": "нет вложений"}, title)
+        return {"error": "нет вложений в заявке", "num": str(num)}
+    P("read", f"ИИ читает договор ({len(paths)} файл.) через Claude API…")
+    terms = R.read_docs(paths, R.NAKOPITEL_INSTRUCTION, R.NAKOPITEL_SCHEMA)
+    P("save", "Сохраняю условия в накопитель…")
+    store_nakopitel(num, binf, terms, title)
     adata_ok = False
-    if b:
+    if binf and not (terms or {}).get("error"):
+        P("adata", "Тяну справку Adata по БИН…")
         try:
             import adata as A
-            store_adata(b, A.fetch(b)); adata_ok = True
+            store_adata(binf, A.fetch(binf)); adata_ok = True
         except Exception:
             pass
-    return {"ok": not bool(terms.get("error")), "num": str(num), "bin": b,
-            "terms": terms, "adata": adata_ok, "attachments": res.get("attachments", [])}
+    return {"ok": not bool((terms or {}).get("error")), "num": str(num), "bin": binf,
+            "terms": terms, "adata": adata_ok, "attachments": [os.path.basename(p) for p in paths]}
+
+
+def read_nakopitel(num, bin_override=""):
+    """Синхронно (для CLI): прочитать договор заявки и сохранить в накопитель."""
+    return _nk_pipeline(num, bin_override)
+
+
+# ---------- фоновые задачи чтения (прогресс для UI) ----------
+import threading
+_JOBS = {}
+_JOBS_LOCK = threading.Lock()
+_JOB_SEQ = 0
+
+
+def _job(jid, stage, msg, done=False, result=None):
+    with _JOBS_LOCK:
+        _JOBS[jid] = {"stage": stage, "msg": msg, "done": done, "result": result,
+                      "ts": datetime.now().strftime("%H:%M:%S")}
+
+
+def _new_job():
+    global _JOB_SEQ
+    with _JOBS_LOCK:
+        _JOB_SEQ += 1
+        jid = "nk%d" % _JOB_SEQ
+        if len(_JOBS) > 60:                       # прунинг завершённых, чтобы словарь не рос
+            for k in [k for k, v in list(_JOBS.items()) if v.get("done")][:40]:
+                _JOBS.pop(k, None)
+    _job(jid, "queued", "В очереди…")
+    return jid
+
+
+def _run_nk_job(jid, num, binv):
+    try:
+        res = _nk_pipeline(num, binv, lambda st, m: _job(jid, st, m))
+        _job(jid, "error" if res.get("error") else "done",
+             res.get("error") or "Готово", done=True, result=res)
+    except Exception as e:
+        _job(jid, "error", str(e)[:200], done=True)
 
 
 def money(n):
@@ -803,7 +859,7 @@ function rNk(v){
   form.innerHTML='<input class=nkin placeholder="№ заявки, напр. 15871" style="padding:7px 10px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;border-radius:8px;width:200px">'
     +'<input class=nkin2 placeholder="БИН (необяз.)" style="padding:7px 10px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;border-radius:8px;width:150px">'
     +'<button class=nkbtn style="padding:7px 14px;border:0;border-radius:8px;background:#0ea5e9;color:#fff;cursor:pointer;font-weight:600">Создать накопитель</button>'
-    +'<span class=nkmsg style="font-size:13px;color:#94a3b8"></span>';
+    +'<div class=nkmsg style="font-size:13px;color:#94a3b8;flex-basis:100%"></div>';
   v.appendChild(form);
   var host=el('div');host.innerHTML='<div class=note>Загрузка накопителя…</div>';v.appendChild(host);
   function load(){
@@ -843,16 +899,35 @@ function rNk(v){
   }).catch(function(e){host.innerHTML='<div class=err>Ошибка загрузки накопителя: '+e+'</div>';});
   }
   var inp=form.querySelector('.nkin'),inp2=form.querySelector('.nkin2'),btn=form.querySelector('.nkbtn'),msg=form.querySelector('.nkmsg');
+  var STEPS=[['queued','Очередь'],['bitrix','Заявка'],['download','Вложения'],['read','ИИ читает'],['save','Сохранение'],['adata','Adata'],['done','Готово']];
+  function sidx(s){for(var i=0;i<STEPS.length;i++)if(STEPS[i][0]===s)return i;return 0;}
+  function prog(stage,text){
+    var cur=sidx(stage);
+    var chips=STEPS.map(function(st,i){
+      var isDone=(stage==='done')||i<cur,now=(i===cur&&stage!=='done');
+      var c=isDone?'#34d399':(now?'#38bdf8':'#475569'),mk=isDone?'✓':(now?'●':'○');
+      return '<span style="color:'+c+';margin-right:10px;white-space:nowrap">'+mk+' '+st[1]+'</span>';
+    }).join('');
+    msg.innerHTML='<div style="color:#e2e8f0;margin-bottom:4px">'+esc(text||'')+'</div><div style="font-size:12px">'+chips+'</div>';
+  }
   btn.onclick=function(){
     var num=(inp.value||'').trim();if(!num){msg.style.color='#f87171';msg.textContent='введи № заявки';return;}
     var bin=(inp2.value||'').trim();
-    btn.disabled=true;msg.style.color='#94a3b8';msg.textContent='Читаю договор через Claude API… (10–30 сек)';
+    btn.disabled=true;msg.style.color='#94a3b8';prog('queued','Запускаю чтение…');
     fetch('nk-read?num='+encodeURIComponent(num)+(bin?('&bin='+encodeURIComponent(bin)):''),{cache:'no-store'})
-      .then(function(r){return r.json();}).then(function(res){
-        btn.disabled=false;var t=res.terms||{};
-        if(res.error||t.error){msg.style.color='#f87171';msg.textContent='✕ '+(res.error||t.error);return;}
-        msg.style.color='#34d399';msg.textContent='✓ '+(t.contract_no||'договор')+' · '+money(t.total||0)+' ₸ — добавлен'+(res.adata?' (+Adata)':'');
-        inp.value='';inp2.value='';load();
+      .then(function(r){return r.json();}).then(function(j){
+        if(j.error||!j.job){btn.disabled=false;msg.style.color='#f87171';msg.textContent='✕ '+(j.error||'не удалось запустить задачу');return;}
+        var poll=setInterval(function(){
+          fetch('nk-status?id='+encodeURIComponent(j.job),{cache:'no-store'}).then(function(r){return r.json();}).then(function(s){
+            if(!s.done){prog(s.stage,s.msg);return;}
+            clearInterval(poll);btn.disabled=false;
+            var res=s.result||{},t=res.terms||{};
+            if(s.stage==='error'||res.error||t.error){msg.style.color='#f87171';msg.innerHTML='✕ '+esc(s.msg||res.error||t.error||'ошибка');return;}
+            prog('done','Готово');
+            msg.innerHTML+='<div style="color:#34d399;margin-top:6px">✓ '+esc(t.contract_no||'договор')+' · '+money(t.total||0)+' ₸ сохранён'+(res.adata?' (+ справка Adata)':'')+'.<br>Строка №'+esc(res.num)+' появилась в таблице ниже — кликни, чтобы провалиться в заявку (договор + оплаты 1С + Adata).</div>';
+            inp.value='';inp2.value='';load();
+          }).catch(function(e){clearInterval(poll);btn.disabled=false;msg.style.color='#f87171';msg.textContent='✕ '+e;});
+        },1200);
       }).catch(function(e){btn.disabled=false;msg.style.color='#f87171';msg.textContent='✕ '+e;});
   };
   inp.addEventListener('keydown',function(e){if(e.key==='Enter')btn.click();});
@@ -1014,7 +1089,7 @@ class H(http.server.BaseHTTPRequestHandler):
             return True
         if self._user():
             return True
-        if self.path.endswith(".json") or self.path in ("/sync", "/sync-full") or self.path.startswith("/nk-read"):
+        if self.path.endswith(".json") or self.path in ("/sync", "/sync-full") or self.path.startswith("/nk-"):
             self._send('{"error":"auth required"}', "application/json", 401)
         else:
             self.send_response(302); self.send_header("Location", "/login"); self.end_headers()
@@ -1054,8 +1129,16 @@ class H(http.server.BaseHTTPRequestHandler):
                 if not num:
                     self._send('{"error":"нет № заявки"}', "application/json", 400)
                 else:
-                    self._send(json.dumps(read_nakopitel(num, binv), ensure_ascii=False), "application/json")
+                    jid = _new_job()
+                    threading.Thread(target=_run_nk_job, args=(jid, num, binv), daemon=True).start()
+                    self._send(json.dumps({"job": jid}), "application/json")
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
+        elif self.path.startswith("/nk-status"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            jid = (q.get("id", [""])[0]).strip()
+            with _JOBS_LOCK:
+                st = dict(_JOBS.get(jid) or {"stage": "unknown", "msg": "задача не найдена", "done": True})
+            self._send(json.dumps(st, ensure_ascii=False), "application/json")
         elif self.path == "/" or self.path.startswith("/?"):
             try: self._send(dashboard())
             except Exception as e: self._send(f"<pre>Ошибка: {e}</pre>", code=500)
