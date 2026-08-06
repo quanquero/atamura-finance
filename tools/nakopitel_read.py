@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Накопитель по одной заявке: Bitrix (договор/КП) → claude -p (условия) → Adata (контрагент).
-Запуск НА СЕРВЕРЕ (там есть BITRIX_WEBHOOK + claude -p):
+"""Накопитель по одной заявке: Bitrix (договор/КП) → Claude API (условия) → Adata (контрагент).
+Запуск НА СЕРВЕРЕ (там есть BITRIX_WEBHOOK + ANTHROPIC_API_KEY):
     ADATA_TOKEN=... python tools/nakopitel_read.py 15871
 Выводит JSON с условиями договора + карточкой контрагента + флагами.
 """
@@ -42,7 +42,7 @@ def main():
     # чтение договора/КП
     terms = None
     if paths:
-        print("# Читаю договор/КП через claude -p …", file=sys.stderr)
+        print("# Читаю договор/КП через Claude API …", file=sys.stderr)
         terms = R.read_docs(paths, R.NAKOPITEL_INSTRUCTION, R.NAKOPITEL_SCHEMA)
     else:
         terms = {"error": "нет вложений в заявке"}

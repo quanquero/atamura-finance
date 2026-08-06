@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Ядро накопителя: прочитать условия договора по одной заявке Bitrix.
-Использует bx_reader (Bitrix + claude -p). Отдельно от server.py, чтобы дёргать и из CLI/батча."""
+Использует bx_reader (Bitrix + Claude API). Отдельно от server.py, чтобы дёргать и из CLI/батча."""
 import os, re
 import bx_reader as R
 
@@ -14,7 +14,7 @@ def _find_bin(item, title):
 
 
 def analyze(num, bin_override=""):
-    """№ заявки → {num,id,title,bin,terms,attachments}. terms — из договора/КП (claude -p)."""
+    """№ заявки → {num,id,title,bin,terms,attachments}. terms — из договора/КП (Claude API)."""
     item = R.item_by_num(num)
     if not item:
         return {"num": num, "error": "заявка не найдена в Bitrix"}
