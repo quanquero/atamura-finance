@@ -430,6 +430,27 @@ def store_adata(bin_, data):
     c.commit(); c.close()
 
 
+def read_nakopitel(num, bin_override=""):
+    """Прочитать договор заявки через Claude API и сохранить в накопитель (+ Adata по БИН).
+    Дёргается из UI (/nk-read) и переиспользуемо из CLI. Возвращает {ok,num,bin,terms,adata}|{error}."""
+    import nakopitel as NK
+    res = NK.analyze(num, bin_override=bin_override)
+    if res.get("error"):
+        return {"error": res["error"], "num": str(num)}
+    terms = res.get("terms") or {}
+    store_nakopitel(num, res.get("bin", ""), terms, res.get("title", ""))
+    b = res.get("bin", "")
+    adata_ok = False
+    if b:
+        try:
+            import adata as A
+            store_adata(b, A.fetch(b)); adata_ok = True
+        except Exception:
+            pass
+    return {"ok": not bool(terms.get("error")), "num": str(num), "bin": b,
+            "terms": terms, "adata": adata_ok, "attachments": res.get("attachments", [])}
+
+
 def money(n):
     return f"{n:,.0f}".replace(",", " ")
 
@@ -777,11 +798,20 @@ function rSved(v){
 
 function rNk(v){
   v.appendChild(h2('Накопитель — обязательства по договорам'));
+  var form=el('div','nkform');
+  form.style.cssText='margin:2px 0 14px;display:flex;align-items:center;flex-wrap:wrap;gap:6px';
+  form.innerHTML='<input class=nkin placeholder="№ заявки, напр. 15871" style="padding:7px 10px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;border-radius:8px;width:200px">'
+    +'<input class=nkin2 placeholder="БИН (необяз.)" style="padding:7px 10px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;border-radius:8px;width:150px">'
+    +'<button class=nkbtn style="padding:7px 14px;border:0;border-radius:8px;background:#0ea5e9;color:#fff;cursor:pointer;font-weight:600">Создать накопитель</button>'
+    +'<span class=nkmsg style="font-size:13px;color:#94a3b8"></span>';
+  v.appendChild(form);
   var host=el('div');host.innerHTML='<div class=note>Загрузка накопителя…</div>';v.appendChild(host);
+  function load(){
+  host.innerHTML='<div class=note>Загрузка накопителя…</div>';
   fetch('nakopitel.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(nd){
     host.innerHTML='';
     var rows=(nd&&nd.rows)||[];
-    if(!rows.length){host.innerHTML='<div class=cashln>Договоры ещё не прочитаны. На сервере: <b>python3 tools/nakopitel_batch.py 5</b> — и обнови страницу.</div>';return;}
+    if(!rows.length){host.innerHTML='<div class=cashln>Договоры ещё не прочитаны. Введи <b>№ заявки</b> выше и нажми «Создать накопитель» — бот прочитает договор из Bitrix через Claude API.</div>';return;}
     var sT=0,sF=0,sO=0,sR=0,nb=0;
     rows.forEach(function(x){sT+=x.total;sF+=x.fact;sO+=x.ostatok;sR+=x.retention;if(x.barter)nb++;});
     var strip=el('div','svet wide');
@@ -811,6 +841,22 @@ function rNk(v){
       searchPlaceholder:'поиск: №, поставщик, договор, объект…',limit:1000})));
     host.appendChild(el('div','note','👆 Клик по строке — полная карточка заявки (договор + оплаты 1С + Adata). Остаток = Договор − Аванс − Удержание − Бартер − Оплачено(1С).'));
   }).catch(function(e){host.innerHTML='<div class=err>Ошибка загрузки накопителя: '+e+'</div>';});
+  }
+  var inp=form.querySelector('.nkin'),inp2=form.querySelector('.nkin2'),btn=form.querySelector('.nkbtn'),msg=form.querySelector('.nkmsg');
+  btn.onclick=function(){
+    var num=(inp.value||'').trim();if(!num){msg.style.color='#f87171';msg.textContent='введи № заявки';return;}
+    var bin=(inp2.value||'').trim();
+    btn.disabled=true;msg.style.color='#94a3b8';msg.textContent='Читаю договор через Claude API… (10–30 сек)';
+    fetch('nk-read?num='+encodeURIComponent(num)+(bin?('&bin='+encodeURIComponent(bin)):''),{cache:'no-store'})
+      .then(function(r){return r.json();}).then(function(res){
+        btn.disabled=false;var t=res.terms||{};
+        if(res.error||t.error){msg.style.color='#f87171';msg.textContent='✕ '+(res.error||t.error);return;}
+        msg.style.color='#34d399';msg.textContent='✓ '+(t.contract_no||'договор')+' · '+money(t.total||0)+' ₸ — добавлен'+(res.adata?' (+Adata)':'');
+        inp.value='';inp2.value='';load();
+      }).catch(function(e){btn.disabled=false;msg.style.color='#f87171';msg.textContent='✕ '+e;});
+  };
+  inp.addEventListener('keydown',function(e){if(e.key==='Enter')btn.click();});
+  load();
 }
 
 function rCtrl(v){
@@ -968,7 +1014,7 @@ class H(http.server.BaseHTTPRequestHandler):
             return True
         if self._user():
             return True
-        if self.path.endswith(".json") or self.path in ("/sync", "/sync-full"):
+        if self.path.endswith(".json") or self.path in ("/sync", "/sync-full") or self.path.startswith("/nk-read"):
             self._send('{"error":"auth required"}', "application/json", 401)
         else:
             self.send_response(302); self.send_header("Location", "/login"); self.end_headers()
@@ -999,6 +1045,16 @@ class H(http.server.BaseHTTPRequestHandler):
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path == "/nakopitel.json":
             try: self._send(json.dumps(nakopitel_data(), ensure_ascii=False), "application/json")
+            except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
+        elif self.path.startswith("/nk-read"):
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                num = (q.get("num", [""])[0]).strip()
+                binv = (q.get("bin", [""])[0]).strip()
+                if not num:
+                    self._send('{"error":"нет № заявки"}', "application/json", 400)
+                else:
+                    self._send(json.dumps(read_nakopitel(num, binv), ensure_ascii=False), "application/json")
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path == "/" or self.path.startswith("/?"):
             try: self._send(dashboard())
