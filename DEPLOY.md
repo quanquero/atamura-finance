@@ -75,9 +75,10 @@ schtasks /query /tn "Atamura1C_Push" /v /fo LIST           # статус/пос
 
 ## Накопитель (чтение договоров, на finance-сервере)
 
-`claude-code` установлен на хост: `npm install -g @anthropic-ai/claude-code@2.1.217`, авторизация
-`CLAUDE_CODE_OAUTH_TOKEN`. Чтение: `bx_reader.py` (заявка Bitrix 178 → вложения → `claude -p` читает
-PDF/сканы) → `nakopitel.py` → таблица `nakopitel` + `adata_cache`.
+Чтение через **Anthropic API** (`pip install anthropic`), ключ `ANTHROPIC_API_KEY` в `.env`
+(опц. `CLAUDE_MODEL`, по умолч. `claude-opus-5`). `bx_reader.py`: заявка Bitrix 178 → вложения →
+Messages API читает PDF (document-блок) и сканы (image-блок) нативно, structured output
+(json_schema) форсирует условия → `nakopitel.py` → таблицы `nakopitel` + `adata_cache`.
 
 ```bash
 python3 tools/nakopitel_read.py <№заявки> [БИН]   # одна заявка (диагностика)

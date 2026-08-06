@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """Чтение вложений заявки Bitrix (воронка оплат 178) внутри фин.блока.
 Тянет заявку по № → находит файловые поля → скачивает договор/КП/счёт →
-читает через `claude -p` (на подписке) → извлекает условия для накопителя.
+читает через Anthropic API (PDF/сканы нативно) → извлекает условия для накопителя.
 
-Куски перенесены из бота договоров (bitrix/attachments/ai), адаптированы под воронку 178.
-Env: BITRIX_WEBHOOK (тот же, что у sync_bitrix), CLAUDE_BIN / claude в PATH."""
-import os, re, ssl, json, glob, shutil, hashlib, subprocess, urllib.request
+Куски перенесены из бота договоров (bitrix/attachments), адаптированы под воронку 178.
+Env: BITRIX_WEBHOOK (тот же, что у sync_bitrix), ANTHROPIC_API_KEY (+ опц. CLAUDE_MODEL)."""
+import base64, os, re, ssl, json, glob, hashlib, urllib.request
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 _CTX = ssl.create_default_context(); _CTX.check_hostname = False; _CTX.verify_mode = ssl.CERT_NONE
@@ -93,14 +93,7 @@ def download(url):
     return p
 
 
-# ---------- чтение через claude -p ----------
-def _claude_bin():
-    b = os.environ.get("CLAUDE_BIN")
-    if b and os.path.exists(b):
-        return b
-    return shutil.which("claude")
-
-
+# ---------- чтение через Anthropic API ----------
 def _docx_text(path):
     try:
         from docx import Document
@@ -150,59 +143,85 @@ def _extract_json(text):
     return None
 
 
-def read_docs(paths, instruction, schema_hint):
-    """Прочитать документы (pdf/img читает Read сам — многостранично; docx/xlsx подаём текстом).
-    Backend: claude -p (подписка). Возвращает dict по schema_hint или None."""
-    cli = _claude_bin()
-    if not cli:
-        return {"error": "claude CLI не найден"}
-    read_paths, dirs, extra = [], set(), ""
+def _build_content(paths, instruction):
+    """Content-блоки для Messages API: image (сканы) / document (PDF) + текст (docx/xlsx)."""
+    blocks, extra, has_media = [], "", False
     for p in paths:
         low = p.lower()
-        if low.endswith((".pdf", ".png", ".jpg", ".jpeg")):
-            read_paths.append(p); dirs.add(os.path.dirname(os.path.abspath(p)))
-        elif low.endswith(".docx"):
-            extra += f"\n[docx {os.path.basename(p)}]\n{_docx_text(p)[:12000]}"
-        elif low.endswith(".xlsx"):
-            extra += f"\n[xlsx {os.path.basename(p)}]\n{_xlsx_text(p)[:12000]}"
-    prompt = instruction + "\n"
-    for rp in read_paths:
-        prompt += f"Прочитай файл целиком (все страницы): {rp}\n"
-    if extra:
-        prompt += "Содержимое приложенных документов:\n" + extra + "\n"
-    prompt += f"Верни СТРОГО один JSON по форме {schema_hint}. Только JSON, без текста вокруг."
-    env = dict(os.environ)
-    env.pop("ANTHROPIC_API_KEY", None)   # иначе claude берёт API-ключ вместо OAuth и падает
-    if not (env.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip():
-        env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
-    cmd = [cli, "-p", "--output-format", "json", "--allowed-tools", "Read"]
-    for d in dirs:
-        cmd += ["--add-dir", d]
+        try:
+            if low.endswith(".pdf"):
+                data = base64.standard_b64encode(open(p, "rb").read()).decode()
+                blocks.append({"type": "document",
+                               "source": {"type": "base64", "media_type": "application/pdf", "data": data}})
+                has_media = True
+            elif low.endswith((".png", ".jpg", ".jpeg")):
+                media = "image/png" if low.endswith(".png") else "image/jpeg"
+                data = base64.standard_b64encode(open(p, "rb").read()).decode()
+                blocks.append({"type": "image", "source": {"type": "base64", "media_type": media, "data": data}})
+                has_media = True
+            elif low.endswith(".docx"):
+                extra += f"\n[docx {os.path.basename(p)}]\n{_docx_text(p)[:12000]}"
+            elif low.endswith(".xlsx"):
+                extra += f"\n[xlsx {os.path.basename(p)}]\n{_xlsx_text(p)[:12000]}"
+        except Exception:
+            pass
+    text = instruction + ("\n\nСодержимое приложенных документов:\n" + extra if extra else "")
+    blocks.append({"type": "text", "text": text})
+    return blocks, (has_media or bool(extra))
+
+
+def read_docs(paths, instruction, schema_hint=None):
+    """Прочитать документы через Anthropic API (PDF+сканы нативно) → dict условий.
+    Структурированный вывод форсируется json_schema. Модель — CLAUDE_MODEL (по умолч. claude-opus-5)."""
     try:
-        r = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
-                           timeout=600, encoding="utf-8", errors="replace", env=env)
-    except Exception as e:
-        return {"error": str(e)}
-    text = r.stdout or ""
-    try:                                   # --output-format json → конверт {type:result, result:"…"}
-        envj = json.loads(text)
-        if isinstance(envj, dict) and "result" in envj:
-            text = envj.get("result") or ""
+        import anthropic
     except Exception:
-        pass
-    j = _extract_json(text)
-    if j:
-        return j
-    return {"error": "не распознал JSON", "raw": (text or r.stderr or "")[:800]}
+        return {"error": "нет пакета anthropic (pip install anthropic)"}
+    if not (os.environ.get("ANTHROPIC_API_KEY") or "").strip():
+        return {"error": "ANTHROPIC_API_KEY не задан"}
+    content, ok = _build_content(paths, instruction)
+    if not ok:
+        return {"error": "нет читаемых вложений"}
+    model = os.environ.get("CLAUDE_MODEL", "claude-opus-5")
+    try:
+        client = anthropic.Anthropic()
+        resp = client.messages.create(
+            model=model, max_tokens=8000,
+            output_config={"format": {"type": "json_schema", "schema": NAKOPITEL_JSON_SCHEMA},
+                           "effort": "medium"},
+            messages=[{"role": "user", "content": content}],
+        )
+    except Exception as e:
+        return {"error": str(e)[:400]}
+    if resp.stop_reason == "refusal":
+        return {"error": "отказ модели (refusal)"}
+    text = next((b.text for b in resp.content if b.type == "text"), "")
+    try:
+        return json.loads(text)          # output_config.format гарантирует валидный JSON
+    except Exception:
+        return _extract_json(text) or {"error": "не распознал JSON", "raw": (text or "")[:400]}
 
 
-# схема условий накопителя (что достаём из договора/КП)
-NAKOPITEL_SCHEMA = ('{"contract_no":"№ договора","contract_date":"дата","total":число_сумма_договора,'
-                    '"currency":"KZT","nds":"с НДС|без НДС","avans_pct":число,"avans_sum":число,'
-                    '"retention_pct":число_гарантийное_удержание,"retention_sum":число,'
-                    '"barter":true_или_false,"barter_sum":число,"ochered":"очередь/блок",'
-                    '"object":"ЖК/объект","notes":"важные условия одной строкой"}')
+# строгая JSON-схема условий накопителя (structured outputs; additionalProperties=false обязателен)
+_S = {"type": "string"}
+_N = {"type": "number"}
+NAKOPITEL_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "contract_no": _S, "contract_date": _S, "total": _N, "currency": _S, "nds": _S,
+        "avans_pct": _N, "avans_sum": _N, "retention_pct": _N, "retention_sum": _N,
+        "barter": {"type": "boolean"}, "barter_sum": _N,
+        "ochered": _S, "object": _S, "account": _S, "notes": _S,
+    },
+    "required": ["contract_no", "contract_date", "total", "currency", "nds", "avans_pct",
+                 "avans_sum", "retention_pct", "retention_sum", "barter", "barter_sum",
+                 "ochered", "object", "account", "notes"],
+    "additionalProperties": False,
+}
+NAKOPITEL_SCHEMA = NAKOPITEL_JSON_SCHEMA   # совместимость со старым импортом
 NAKOPITEL_INSTRUCTION = (
-    "Ты финансовый контролёр стройхолдинга. Перед тобой договор подряда/поставки и/или КП (Казахстан). "
-    "Извлеки финансовые условия: точную сумму договора, аванс (% и сумму), гарантийное удержание (%), "
-    "бартер (есть ли, сумма), очередь/блок и объект (ЖК). Если чего-то нет — ставь 0 или пустую строку.")
+    "Ты финансовый контролёр стройхолдинга (Казахстан). Перед тобой договор подряда/поставки и/или КП/счёт. "
+    "Извлеки: № и дату договора; total = сумма ИМЕННО ЭТОГО договора/счёта (НЕ накопительный итог по объекту); "
+    "валюту и режим НДС; аванс (% и сумму); гарантийное удержание (% и сумму); бартер (есть/нет и сумму); "
+    "очередь/блок; объект (ЖК); account = № счёта/акта, если указан. "
+    "В notes — важные условия и оговорки одной строкой. Чего нет — ставь 0 или пустую строку.")
