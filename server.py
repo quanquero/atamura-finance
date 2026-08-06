@@ -164,29 +164,39 @@ def sync_bitrix():
     return {"ok": True, "заявок": n}
 
 
-def sync_bitrix_full():
-    """Лёгкий индекс № → id по ВСЕМ заявкам (вся история) — чтобы матчить платежи вне окна."""
+def sync_bitrix_full(rebuild=False):
+    """Лёгкий индекс № → id по заявкам (чтобы матчить платежи вне окна). Маппинг № → id неизменен
+    и только растёт, поэтому по умолчанию ИНКРЕМЕНТНО: тянем лишь заявки с id больше максимального
+    уже известного (order[id] desc → как встретили известный id, дальше только старые — стоп).
+    rebuild=True — полный пересбор с нуля (первый запуск/если индекс побит)."""
     if not BITRIX:
         return {"error": "BITRIX_WEBHOOK не задан"}
-    idx, start = {}, 0
-    while True:
+    c = _db()
+    known = dict(c.execute("SELECT num,id FROM zayavka_idx").fetchall())
+    max_id = 0 if (rebuild or not known) else max(int(v) for v in known.values() if v is not None)
+    new, start, stop = {}, 0, False
+    while not stop:
         d = _bx("crm.item.list", {"entityTypeId": BX_ENTITY, "start": start, "order[id]": "desc",
                                    "select[]": ["id", "ufCrm4_1644310716"]})
         items = d.get("result", {}).get("items", [])
         for it in items:
+            iid = it.get("id")
+            if max_id and iid is not None and int(iid) <= max_id:
+                stop = True; break            # дошли до уже проиндексированных — ниже только старые
             n = str(it.get("ufCrm4_1644310716") or "").strip()
             if n:
-                idx.setdefault(n, it.get("id"))
-        if len(items) < 50 or len(idx) >= 40000:
+                new.setdefault(n, iid)
+        if len(items) < 50 or len(known) + len(new) >= 40000:
             break
         start += 50
-    c = _db()
-    c.execute("DELETE FROM zayavka_idx")
-    c.executemany("INSERT OR REPLACE INTO zayavka_idx VALUES(?,?)", list(idx.items()))
+    if rebuild:
+        c.execute("DELETE FROM zayavka_idx")
+    if new or rebuild:
+        c.executemany("INSERT OR REPLACE INTO zayavka_idx VALUES(?,?)", list(new.items()))
     c.execute("INSERT INTO meta(k,v) VALUES('idx_ts',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
               (datetime.now().strftime("%Y-%m-%d %H:%M"),))
-    c.commit(); n = len(idx); c.close()
-    return {"ok": True, "индекс_заявок": n}
+    c.commit(); total = (0 if rebuild else len(known)) + len(new); c.close()
+    return {"ok": True, "индекс_заявок": total, "новых": len(new)}
 
 
 def _num_from(s):
