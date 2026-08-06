@@ -723,6 +723,52 @@ function openNkCard(x, amap, portal, ent){
   openModal(html);
 }
 
+// ---- накопитель: общий флоу чтения (форма во вкладке + кнопка в «Сведении») ----
+var NK_STEPS=[['queued','Очередь'],['bitrix','Заявка'],['download','Вложения'],['read','ИИ читает'],['save','Сохранение'],['adata','Adata'],['done','Готово']];
+function nkStepsHTML(stage,text){
+  var cur=0;for(var i=0;i<NK_STEPS.length;i++)if(NK_STEPS[i][0]===stage)cur=i;
+  var chips=NK_STEPS.map(function(st,i){
+    var done=(stage==='done')||i<cur,now=(i===cur&&stage!=='done');
+    var c=done?'#34d399':(now?'#38bdf8':'#475569'),mk=done?'✓':(now?'●':'○');
+    return '<span style="color:'+c+';margin-right:10px;white-space:nowrap">'+mk+' '+st[1]+'</span>';
+  }).join('');
+  return '<div style="color:#e2e8f0;margin-bottom:4px">'+esc(text||'')+'</div><div style="font-size:12px">'+chips+'</div>';
+}
+function nkRead(num,bin,onStage,onDone){
+  onStage('queued','Запускаю чтение…');
+  fetch('nk-read?num='+encodeURIComponent(num)+(bin?('&bin='+encodeURIComponent(bin)):''),{cache:'no-store'})
+    .then(function(r){return r.json();}).then(function(j){
+      if(j.error||!j.job){onDone({error:j.error||'не удалось запустить задачу'});return;}
+      var poll=setInterval(function(){
+        fetch('nk-status?id='+encodeURIComponent(j.job),{cache:'no-store'}).then(function(r){return r.json();}).then(function(s){
+          if(!s.done){onStage(s.stage,s.msg);return;}
+          clearInterval(poll);var res=s.result||{},t=res.terms||{};
+          if(s.stage==='error'||res.error||t.error){onDone({error:s.msg||res.error||t.error||'ошибка'});return;}
+          onDone({ok:true,num:res.num,terms:t,adata:res.adata});
+        }).catch(function(e){clearInterval(poll);onDone({error:''+e});});
+      },1200);
+    }).catch(function(e){onDone({error:''+e});});
+}
+function openNkByNum(num){
+  fetch('nakopitel.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(nd){
+    var row=(nd.rows||[]).filter(function(x){return String(x.num)===String(num);})[0];
+    if(row)openNkCard(row,nd.adata,nd.bx_portal,nd.bx_entity);
+    else openModal('<div class=note>Накопитель по №'+esc(num)+' пока не найден.</div>');
+  });
+}
+function nkCreateFlow(z,btn,nkSet){
+  openModal('<div class=nkhd><div class=t>Создаю накопитель · заявка №'+esc(z.num)+'</div><div class=s>'+esc(z.supplier||z.name||'')+'</div></div><div id=nkprog style="margin-top:12px"><div class=note>Запускаю…</div></div>');
+  var host=document.getElementById('nkprog');btn.disabled=true;
+  nkRead(z.num,'',function(stage,text){host.innerHTML=nkStepsHTML(stage,text);},function(res){
+    btn.disabled=false;
+    if(res.error){host.innerHTML='<div class=err style="margin-top:6px">✕ '+esc(res.error)+'</div>';return;}
+    if(nkSet)nkSet[String(z.num)]=1;
+    btn.textContent='Накопитель ✓';btn.dataset.has='1';btn.style.background='#134e4a';btn.style.color='#5eead4';
+    host.innerHTML=nkStepsHTML('done','Готово')+'<div style="color:#34d399;margin:8px 0">✓ '+esc(res.terms.contract_no||'договор')+' · '+money(res.terms.total||0)+' ₸ сохранён'+(res.adata?' (+ справка Adata)':'')+'</div><button class=nkopenbtn style="padding:7px 14px;border:0;border-radius:8px;background:#0ea5e9;color:#fff;cursor:pointer;font-weight:600">Открыть карточку заявки →</button>';
+    host.querySelector('.nkopenbtn').onclick=function(){openNkByNum(z.num);};
+  });
+}
+
 function donutSVG(pairs,colors){
   var size=180,r=62,w=24,cx=size/2,cy=size/2,tot=0,i;
   for(i=0;i<pairs.length;i++){if(pairs[i][1]>0)tot+=pairs[i][1];}
@@ -824,17 +870,10 @@ function rPay(v){
 function rSved(v){
   var stmap={success:'Успешно',fail:'Отказано',progress:'в работе'};
   D.zayavki.forEach(function(z){z._st=z.paid?'оплачено':(z.stage=='fail'?'отказано':'ждёт 1С');});
-  var fSt=selectFilter('Статус','_st',['оплачено','ждёт 1С','отказано']);
   var bx=D.bx_portal,ent=D.bx_entity;
-  var zcols=[
-    {key:'num',label:'Заявка',render:function(z){return (bx&&z.id)?('<a href="'+bx+'/crm/type/'+ent+'/details/'+z.id+'/" target=_blank>№'+z.num+'</a>'):('№'+z.num);}},
-    {key:'company',label:'Компания'},{key:'supplier',label:'Поставщик'},
-    {key:'amount',label:'Сумма',num:true,render:function(z){return money(z.amount);}},
-    {key:'_st',label:'Статус',render:function(z){return (z.paid?'<span class="pill ok">✅ оплачено</span>':'<span class="pill wait">⏳ ждёт</span>')+' <span class="pill '+(z.stage=='fail'?'pr':(z.stage=='success'?'ok':'py'))+'">'+(stmap[z.stage]||z.stage)+'</span>';}}
-  ];
   v.appendChild(h2('Заявки Bitrix ↔ платежи 1С'));
-  v.appendChild(card(dataTable(D.zayavki,zcols,{filters:[fSt],sort:'amount',dir:-1,
-    searchText:function(z){return z.num+' '+z.company+' '+z.supplier;},searchPlaceholder:'поиск: №, компания, поставщик…',limit:1500})));
+  v.appendChild(el('div','note','Кнопка «Создать» читает договор заявки через Claude API и строит накопитель. После — «Накопитель ✓» открывает карточку (провал в заявку).'));
+  var zhost=el('div');zhost.innerHTML='<div class=note>Загрузка…</div>';v.appendChild(zhost);
   var c=D.counts;
   D.orphans.forEach(function(o){o._r=o.reestr?'в реестре':'нигде нет';});
   var fR=selectFilter('Реестр','_r',['нигде нет','в реестре']);
@@ -850,6 +889,31 @@ function rSved(v){
   v.appendChild(el('div','cashln','Из '+c.nz+' платежей без заявки Bitrix: <b>'+c.nz_in_reestr+'</b> нашлись в реестре финотдела, <b>'+c.nz_orphan+'</b> — нигде нет (реальные кандидаты на проверку).'));
   v.appendChild(card(dataTable(D.orphans,ocols,{filters:[fR],sort:'amount',dir:-1,sumKey:'amount',
     searchText:function(o){return o.num+' '+o.name+' '+o.company;},searchPlaceholder:'поиск: №, поставщик, компания…',limit:1500})));
+  fetch('nakopitel.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(nd){
+    var nkSet={};((nd&&nd.rows)||[]).forEach(function(x){nkSet[String(x.num)]=1;});
+    var fSt=selectFilter('Статус','_st',['оплачено','ждёт 1С','отказано']);
+    var zcols=[
+      {key:'num',label:'Заявка',render:function(z){return (bx&&z.id)?('<a href="'+bx+'/crm/type/'+ent+'/details/'+z.id+'/" target=_blank>№'+z.num+'</a>'):('№'+z.num);}},
+      {key:'company',label:'Компания'},{key:'supplier',label:'Поставщик'},
+      {key:'amount',label:'Сумма',num:true,render:function(z){return money(z.amount);}},
+      {key:'_st',label:'Статус',render:function(z){return (z.paid?'<span class="pill ok">✅ оплачено</span>':'<span class="pill wait">⏳ ждёт</span>')+' <span class="pill '+(z.stage=='fail'?'pr':(z.stage=='success'?'ok':'py'))+'">'+(stmap[z.stage]||z.stage)+'</span>';}},
+      {key:'_nk',label:'Накопитель',render:function(z){
+        if(!z.num)return '<span style=color:#cbd5e1>—</span>';
+        var has=nkSet[String(z.num)]?1:0;
+        return '<button class=nkbtn2 data-num="'+esc(z.num)+'" data-has="'+has+'" style="padding:4px 10px;border:0;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;'+(has?'background:#134e4a;color:#5eead4':'background:#0ea5e9;color:#fff')+'">'+(has?'Накопитель ✓':'Создать')+'</button>';
+      }}
+    ];
+    var ztbl=dataTable(D.zayavki,zcols,{filters:[fSt],sort:'amount',dir:-1,
+      searchText:function(z){return z.num+' '+z.company+' '+z.supplier;},searchPlaceholder:'поиск: №, компания, поставщик…',limit:1500});
+    ztbl.addEventListener('click',function(e){
+      var b=e.target.closest('button.nkbtn2');if(!b)return;e.stopPropagation();
+      var num=b.getAttribute('data-num');
+      if(b.dataset.has==='1'){openNkByNum(num);return;}
+      var z=D.zayavki.filter(function(x){return String(x.num)===String(num);})[0]||{num:num};
+      nkCreateFlow(z,b,nkSet);
+    });
+    zhost.innerHTML='';zhost.appendChild(card(ztbl));
+  }).catch(function(e){zhost.innerHTML='<div class=err>Ошибка загрузки заявок: '+e+'</div>';});
 }
 
 function rNk(v){
@@ -899,36 +963,15 @@ function rNk(v){
   }).catch(function(e){host.innerHTML='<div class=err>Ошибка загрузки накопителя: '+e+'</div>';});
   }
   var inp=form.querySelector('.nkin'),inp2=form.querySelector('.nkin2'),btn=form.querySelector('.nkbtn'),msg=form.querySelector('.nkmsg');
-  var STEPS=[['queued','Очередь'],['bitrix','Заявка'],['download','Вложения'],['read','ИИ читает'],['save','Сохранение'],['adata','Adata'],['done','Готово']];
-  function sidx(s){for(var i=0;i<STEPS.length;i++)if(STEPS[i][0]===s)return i;return 0;}
-  function prog(stage,text){
-    var cur=sidx(stage);
-    var chips=STEPS.map(function(st,i){
-      var isDone=(stage==='done')||i<cur,now=(i===cur&&stage!=='done');
-      var c=isDone?'#34d399':(now?'#38bdf8':'#475569'),mk=isDone?'✓':(now?'●':'○');
-      return '<span style="color:'+c+';margin-right:10px;white-space:nowrap">'+mk+' '+st[1]+'</span>';
-    }).join('');
-    msg.innerHTML='<div style="color:#e2e8f0;margin-bottom:4px">'+esc(text||'')+'</div><div style="font-size:12px">'+chips+'</div>';
-  }
   btn.onclick=function(){
     var num=(inp.value||'').trim();if(!num){msg.style.color='#f87171';msg.textContent='введи № заявки';return;}
-    var bin=(inp2.value||'').trim();
-    btn.disabled=true;msg.style.color='#94a3b8';prog('queued','Запускаю чтение…');
-    fetch('nk-read?num='+encodeURIComponent(num)+(bin?('&bin='+encodeURIComponent(bin)):''),{cache:'no-store'})
-      .then(function(r){return r.json();}).then(function(j){
-        if(j.error||!j.job){btn.disabled=false;msg.style.color='#f87171';msg.textContent='✕ '+(j.error||'не удалось запустить задачу');return;}
-        var poll=setInterval(function(){
-          fetch('nk-status?id='+encodeURIComponent(j.job),{cache:'no-store'}).then(function(r){return r.json();}).then(function(s){
-            if(!s.done){prog(s.stage,s.msg);return;}
-            clearInterval(poll);btn.disabled=false;
-            var res=s.result||{},t=res.terms||{};
-            if(s.stage==='error'||res.error||t.error){msg.style.color='#f87171';msg.innerHTML='✕ '+esc(s.msg||res.error||t.error||'ошибка');return;}
-            prog('done','Готово');
-            msg.innerHTML+='<div style="color:#34d399;margin-top:6px">✓ '+esc(t.contract_no||'договор')+' · '+money(t.total||0)+' ₸ сохранён'+(res.adata?' (+ справка Adata)':'')+'.<br>Строка №'+esc(res.num)+' появилась в таблице ниже — кликни, чтобы провалиться в заявку (договор + оплаты 1С + Adata).</div>';
-            inp.value='';inp2.value='';load();
-          }).catch(function(e){clearInterval(poll);btn.disabled=false;msg.style.color='#f87171';msg.textContent='✕ '+e;});
-        },1200);
-      }).catch(function(e){btn.disabled=false;msg.style.color='#f87171';msg.textContent='✕ '+e;});
+    var bin=(inp2.value||'').trim();btn.disabled=true;msg.style.color='#94a3b8';
+    nkRead(num,bin,function(stage,text){msg.innerHTML=nkStepsHTML(stage,text);},function(res){
+      btn.disabled=false;
+      if(res.error){msg.style.color='#f87171';msg.innerHTML='<div style="color:#f87171">✕ '+esc(res.error)+'</div>';return;}
+      msg.innerHTML=nkStepsHTML('done','Готово')+'<div style="color:#34d399;margin-top:6px">✓ '+esc(res.terms.contract_no||'договор')+' · '+money(res.terms.total||0)+' ₸ сохранён'+(res.adata?' (+ справка Adata)':'')+'. Строка №'+esc(res.num)+' в таблице ниже — кликни, чтобы провалиться в заявку.</div>';
+      inp.value='';inp2.value='';load();
+    });
   };
   inp.addEventListener('keydown',function(e){if(e.key==='Enter')btn.click();});
   load();
