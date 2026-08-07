@@ -11,10 +11,28 @@
 Запись в Bitrix идемпотентна (по хэшу текста): повторно тот же комментарий не постим.
 CLI — tools/precheck_run.py (--dry печатает, --post пишет)."""
 import os
+import re
 import json
 from datetime import datetime
 import server as S
 import bx_reader as R
+
+# Справочник алиасов компаний: одна дочка под разными именами (заявки Bitrix vs 1С-база vs имя-поставщик).
+# key = нормализованное имя (без ТОО/кавычек) → канон-ключ. Подтверждено: Orion=EuroStroy=Eurotest.
+COMPANY_ALIASES = {
+    "orionengineering": "eurotest", "eurostroycompany": "eurotest",
+    "eurostroy": "eurotest", "еврострой": "eurotest",
+}
+
+
+def _canon(name):
+    """Канон-ключ компании: убрать ТОО/ИП/кавычки/регистр + свести алиасы к одной дочке."""
+    s = str(name or "").lower()
+    for ch in '«»"“”':
+        s = s.replace(ch, "")
+    s = re.sub(r"\b(тоо|too|ип|ао|тд|оао|зао)\b", " ", s)
+    key = re.sub(r"[^0-9a-zа-яё]", "", s)
+    return COMPANY_ALIASES.get(key, key)
 
 PAY_STAGE_NAMES = [n.strip() for n in os.environ.get("PAY_STAGE_NAMES", "Оплата").split(";") if n.strip()]
 # точный список stageId (приоритет над резолвом по названию) — воронка фин.дира, где сидит «Оплата»
@@ -109,6 +127,11 @@ def verdict(item, pays, read=True):
         S.read_nakopitel(num)          # прочитать договор (Claude API) + сохранить
         nk = _nakopitel(num)
     buff, remarks, sher = {}, [], []
+    # покрытие 1С: загружена ли база компании-плательщика (иначе «оплачено 0» — не факт)
+    company = S._company_from(item.get("title", ""))
+    loaded = {_canon(p[0]) for p in pays if p[0]}
+    if company and _canon(company) not in loaded:
+        remarks.append("⚠ 1С по компании «%s» не загружена в ядро — оплаты/остаток могут быть неполны" % company)
     binf = nk[0] if nk else ""
     fact = sum((p[2] or 0) for p in pays if S._num_from(p[4]) == num)
     # --- Баффет ---
