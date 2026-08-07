@@ -11,10 +11,28 @@
 Запись в Bitrix идемпотентна (по хэшу текста): повторно тот же комментарий не постим.
 CLI — tools/precheck_run.py (--dry печатает, --post пишет)."""
 import os
+import json
+from datetime import datetime
 import server as S
 import bx_reader as R
 
 PAY_STAGE_NAMES = [n.strip() for n in os.environ.get("PAY_STAGE_NAMES", "Оплата").split(";") if n.strip()]
+NDS_LIMIT_IP = int(os.environ.get("NDS_LIMIT_IP", "43250000"))   # порог НДС для ИП (Казахстан, ₸/год)
+
+
+def _adata(bin_):
+    c = S._db()
+    r = c.execute("SELECT json FROM adata_cache WHERE bin=?", (str(bin_),)).fetchone()
+    c.close()
+    try:
+        return json.loads(r[0]) if r and r[0] else {}
+    except Exception:
+        return {}
+
+
+def _year_paid(bin_, pays, year):
+    """Сумма оплат 1С контрагенту (по БИН) за календарный год (по данным ядра)."""
+    return sum((p[2] or 0) for p in pays if p[6] == bin_ and str(p[3] or "")[:4] == str(year))
 
 
 def _ensure_table():
@@ -111,6 +129,22 @@ def verdict(item, pays, read=True):
             remarks.append("Счёт без подтверждающих актов (КС-2/КС-3)")
     else:
         remarks.append("Договор не прочитан — накопитель не построен")
+    # --- Adata: аресты счетов, налоговый долг, лимит НДС для ИП ---
+    ad = _adata(binf) if binf else {}
+    rf = ad.get("riskFactor", {}).get("company", {})
+    stt = ad.get("status", {})
+    bsc = ad.get("basic", {})
+    if rf.get("seized_bank_account") or rf.get("seized_property"):
+        remarks.append("🔴 Аресты счетов/имущества у контрагента (Adata)")
+    if stt.get("tax_debt"):
+        remarks.append("Налоговая задолженность контрагента %s ₸ (Adata)" % S.money(stt.get("tax_debt")))
+    is_ip = str(supplier).strip().lower().startswith("ип") or "индивид" in str(bsc.get("legal_form", "")).lower()
+    if is_ip and not bsc.get("is_nds_payer") and binf:
+        projected = _year_paid(binf, pays, datetime.now().year) + amount
+        if projected > NDS_LIMIT_IP:
+            remarks.append("ИП превышает годовой лимит НДС: оборот ~%s ₸ (с этой оплатой) > %s ₸ — обязан встать на НДС" % (S.money(projected), S.money(NDS_LIMIT_IP)))
+        elif projected > NDS_LIMIT_IP * 0.85:
+            remarks.append("ИП близок к лимиту НДС: ~%s из %s ₸/год" % (S.money(projected), S.money(NDS_LIMIT_IP)))
     # --- Шерлок ---
     already = [p for p in pays if S._num_from(p[4]) == num]
     if already:
