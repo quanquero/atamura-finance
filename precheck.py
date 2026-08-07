@@ -123,9 +123,12 @@ def verdict(item, pays, read=True):
             remarks.append("Указан бартер, но сумма бартера не учтена")
         low = (notes or "").lower()
         ctx = (str(item.get("title", "")) + " " + (notes or "")).lower()
-        is_works = any(w in ctx for w in ("подряд", "работ", "смр", "отделк", "монолит",
-                                          "кладк", "гидроизол", "устройств", "монтаж"))
-        if is_works and "кс-2" not in low and "кс-3" not in low and "акт" not in low:
+        services = any(w in ctx for w in ("услуг", "обслуживан", "аренд", "кран", "экскаватор",
+                                          "техник", "поставк", "товар", "материал"))
+        is_works = (not services) and any(w in ctx for w in ("подряд", "работ", "смр", "отделк",
+                                          "монолит", "кладк", "гидроизол", "устройств", "монтаж"))
+        # «без актов» — только когда есть распознанный договор подряда (иначе утверждать нечего)
+        if cno and is_works and "кс-2" not in low and "кс-3" not in low and "акт" not in low:
             remarks.append("Счёт без подтверждающих актов (КС-2/КС-3)")
     else:
         remarks.append("Договор не прочитан — накопитель не построен")
