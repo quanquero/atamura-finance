@@ -57,7 +57,10 @@ def _year_paid(bin_, pays, year):
 
 def _ensure_table():
     c = S._db()
-    c.execute("CREATE TABLE IF NOT EXISTS precheck(num TEXT PRIMARY KEY, hash TEXT, ts TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS precheck(num TEXT PRIMARY KEY, hash TEXT, comment_id TEXT, ts TEXT)")
+    cols = {r[1] for r in c.execute("PRAGMA table_info(precheck)").fetchall()}
+    if "comment_id" not in cols:                       # миграция со старой схемы (num,hash,ts)
+        c.execute("ALTER TABLE precheck ADD COLUMN comment_id TEXT")
     c.commit(); c.close()
 
 
@@ -210,22 +213,27 @@ def comment_text(v):
     return "\n".join(L)
 
 
-def _already_posted(num, h):
+def _posted(num):
+    """(hash, comment_id) последнего запощенного вердикта по заявке, или (None, None)."""
     c = S._db()
-    r = c.execute("SELECT hash FROM precheck WHERE num=?", (str(num),)).fetchone()
+    r = c.execute("SELECT hash, comment_id FROM precheck WHERE num=?", (str(num),)).fetchone()
     c.close()
-    return bool(r and r[0] == h)
+    return (r[0], r[1]) if r else (None, None)
 
 
-def _mark_posted(num, h):
-    from datetime import datetime
+def _mark_posted(num, h, cid):
     c = S._db()
-    c.execute("INSERT OR REPLACE INTO precheck VALUES(?,?,?)",
-              (str(num), h, datetime.now().strftime("%Y-%m-%d %H:%M")))
+    c.execute("INSERT OR REPLACE INTO precheck(num,hash,comment_id,ts) VALUES(?,?,?,?)",
+              (str(num), h, str(cid or ""), datetime.now().strftime("%Y-%m-%d %H:%M")))
     c.commit(); c.close()
 
 
 def post_comment(item_id, text):
-    """Комментарий в таймлайн карточки smart-process (DYNAMIC_178)."""
+    """Добавить комментарий в таймлайн карточки smart-process (DYNAMIC_178). Возвращает id комментария."""
     return R._bx("crm.timeline.comment.add",
                  {"fields": {"ENTITY_ID": item_id, "ENTITY_TYPE": "DYNAMIC_%d" % R.BX_ENTITY, "COMMENT": text}})
+
+
+def update_comment(comment_id, text):
+    """Обновить существующий комментарий (чтобы не плодить дубли при повторной проверке)."""
+    return R._bx("crm.timeline.comment.update", {"id": comment_id, "fields": {"COMMENT": text}})

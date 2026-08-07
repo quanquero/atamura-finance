@@ -55,13 +55,17 @@ def main():
         print("=" * 70)
         print(text)
         if post:
-            if P._already_posted(v["num"], h):
-                print("\n[ уже запостен такой же комментарий — пропуск ]")
+            ph, pcid = P._posted(v["num"])
+            if ph == h:
+                print("\n[ вердикт не изменился — пропуск ]")
             else:
                 try:
-                    P.post_comment(it["id"], text)
-                    P._mark_posted(v["num"], h)
-                    print("\n[ ✓ запостен в карточку id=%s ]" % it["id"])
+                    if pcid:
+                        P.update_comment(pcid, text); cid, act = pcid, "обновлён"
+                    else:
+                        cid, act = P.post_comment(it["id"], text), "запостен"
+                    P._mark_posted(v["num"], h, cid)
+                    print("\n[ ✓ комментарий %s (id=%s) ]" % (act, cid))
                 except Exception as e:
                     print("\n[ ✕ ошибка постинга: %s ]" % str(e)[:200])
         print()
