@@ -17,6 +17,8 @@ import server as S
 import bx_reader as R
 
 PAY_STAGE_NAMES = [n.strip() for n in os.environ.get("PAY_STAGE_NAMES", "Оплата").split(";") if n.strip()]
+# точный список stageId (приоритет над резолвом по названию) — воронка фин.дира, где сидит «Оплата»
+PAY_STAGE_IDS = [s.strip() for s in os.environ.get("PAY_STAGE_IDS", "").split(";") if s.strip()]
 NDS_LIMIT_IP = int(os.environ.get("NDS_LIMIT_IP", "43250000"))   # порог НДС для ИП (Казахстан, ₸/год)
 
 

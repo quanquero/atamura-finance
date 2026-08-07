@@ -23,7 +23,7 @@ def main():
         print("BITRIX_WEBHOOK не задан"); return
 
     P._ensure_table()
-    stages = P.pay_stage_ids()
+    stages = {sid: "(закреплён)" for sid in P.PAY_STAGE_IDS} if P.PAY_STAGE_IDS else P.pay_stage_ids()
     if not stages:
         print("Стадии «Оплата» не нашёл. Проверь PAY_STAGE_NAMES (сейчас: %s)." % P.PAY_STAGE_NAMES)
         print("Подсказка: скорее всего название стадии другое — вывожу все стадии воронки ниже:")

@@ -662,8 +662,17 @@ function boot(){
   var bar=el('div','tabs');
   TABS.forEach(function(t){var b=el('button','tab'+(t[0]==tab?' on':''),t[1]);b.onclick=function(){tab=t[0];for(var i=0;i<bar.children.length;i++)bar.children[i].classList.toggle('on',TABS[i][0]==tab);render();};bar.appendChild(b);});
   app.appendChild(bar);
-  var v=el('div','wrap');v.id='view';app.appendChild(v);
+  var v=el('div','wrap');v.id='view';v.style.paddingBottom='48px';app.appendChild(v);
   render();
+  var foot=el('div');
+  foot.style.cssText='position:fixed;left:0;right:0;bottom:0;background:#0f2233;color:#94a3b8;font-size:12px;padding:7px 16px;border-top:1px solid #1e3a52;display:flex;gap:8px;flex-wrap:wrap;align-items:center;z-index:40';
+  function ago(s){var d=new Date(String(s||'').replace(' ','T'));if(isNaN(d))return '';var mn=Math.round((Date.now()-d.getTime())/60000);if(mn<1)return 'только что';if(mn<60)return mn+' мин назад';var h=Math.round(mn/60);if(h<48)return h+' ч назад';return Math.round(h/24)+' дн назад';}
+  function col(s,hw){var d=new Date(String(s||'').replace(' ','T'));return (isNaN(d)||(Date.now()-d.getTime())/3600000>hw)?'#fbbf24':'#34d399';}
+  foot.innerHTML='<span style="color:#64748b">Обновлено:</span>'
+    +'<span>1С <b style="color:'+col(m.ts,6)+'">'+esc(m.ts||'—')+'</b> <span style="color:#64748b">('+ago(m.ts)+')</span></span>'
+    +'<span>· Bitrix <b style="color:'+col(m.bx_sync,12)+'">'+esc(m.bx_sync||'—')+'</b> <span style="color:#64748b">('+ago(m.bx_sync)+')</span></span>'
+    +'<span style="color:#64748b">· индекс '+esc(m.idx_ts||'—')+'</span>';
+  app.appendChild(foot);
 }
 function render(){var v=document.getElementById('view');v.innerHTML='';({obzor:rObzor,pay:rPay,sved:rSved,nk:rNk,ctrl:rCtrl}[tab])(v);}
 
