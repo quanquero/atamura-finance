@@ -35,7 +35,7 @@ BASE = USER = PASS = ""
 def _load_config():
     """bases.json: {months, bases:[{company, base, user, pass}]}. Фолбэк — одиночная база из .env."""
     try:
-        cfg = json.load(open(os.path.join(HERE, "bases.json"), encoding="utf-8"))
+        cfg = json.load(open(os.path.join(HERE, "bases.json"), encoding="utf-8-sig"))  # -sig: терпит BOM
         return int(cfg.get("months", 1)), cfg.get("bases", [])
     except Exception:
         env = {}
