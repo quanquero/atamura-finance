@@ -733,7 +733,18 @@ function openNkCard(x, amap, portal, ent){
     +(x.notes?('<div class=nknote>📄 '+esc(x.notes)+'</div>'):'')+'</div>'
     +'<h4>Оплаты 1С по заявке</h4><div class=tblscroll style="max-height:30vh"><table><thead><tr><th>Дата</th><th>Объект</th><th>Счёт</th><th>Назначение</th><th class=num>Сумма</th></tr></thead><tbody>'+pr+'</tbody></table></div>'
     +(cl?('<h4>Проверка контрагента (Adata)</h4><div class=tblscroll style="max-height:34vh"><table><tbody>'+cl+'</tbody></table></div>'):'<div class=note>Adata по этому БИН ещё не подгружена.</div>');
+  html+='<h4>💬 Комментарии сотрудников (Bitrix)</h4><div id=nkcomments class=note>загрузка…</div>';
   openModal(html);
+  if(x.id){
+    fetch('nk-comments?id='+encodeURIComponent(x.id)+'&num='+encodeURIComponent(x.num||''),{cache:'no-store'})
+      .then(function(r){return r.json();}).then(function(d){
+        var host=document.getElementById('nkcomments');if(!host)return;
+        var cs=(d&&d.comments)||[];
+        if(!cs.length){host.innerHTML='<span style=color:#94a3b8>заметок в карточке нет</span>';return;}
+        host.className='';
+        host.innerHTML=cs.map(function(c){return '<div style="border-left:2px solid #334155;padding:3px 0 3px 10px;margin:6px 0"><div style="color:#94a3b8;font-size:11px">'+esc(c.created||'')+' · автор '+esc(c.author||'')+'</div><div>'+esc(c.text||'')+'</div></div>';}).join('');
+      }).catch(function(e){var h=document.getElementById('nkcomments');if(h)h.innerHTML='<span class=err>ошибка загрузки комментариев</span>';});
+  }
 }
 
 // ---- накопитель: общий флоу чтения (форма во вкладке + кнопка в «Сведении») ----
@@ -1195,6 +1206,18 @@ class H(http.server.BaseHTTPRequestHandler):
             with _JOBS_LOCK:
                 st = dict(_JOBS.get(jid) or {"stage": "unknown", "msg": "задача не найдена", "done": True})
             self._send(json.dumps(st, ensure_ascii=False), "application/json")
+        elif self.path.startswith("/nk-comments"):
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                num = (q.get("num", [""])[0]).strip()
+                iid = (q.get("id", [""])[0]).strip()
+                import precheck as PC
+                cms = PC.fetch_comments(int(iid)) if iid.isdigit() else []
+                if num and iid.isdigit():
+                    PC.store_comments(num, int(iid), cms)
+                self._send(json.dumps({"comments": cms}, ensure_ascii=False), "application/json")
+            except Exception as e:
+                self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path == "/" or self.path.startswith("/?"):
             try: self._send(dashboard())
             except Exception as e: self._send(f"<pre>Ошибка: {e}</pre>", code=500)

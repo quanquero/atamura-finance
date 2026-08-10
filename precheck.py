@@ -55,12 +55,47 @@ def _year_paid(bin_, pays, year):
     return sum((p[2] or 0) for p in pays if p[6] == bin_ and str(p[3] or "")[:4] == str(year))
 
 
+BOT_MARK = "Проверка перед оплатой"        # наши комментарии-вердикты — не путать с сотрудничьими
+
+
 def _ensure_table():
     c = S._db()
     c.execute("CREATE TABLE IF NOT EXISTS precheck(num TEXT PRIMARY KEY, hash TEXT, comment_id TEXT, ts TEXT)")
     cols = {r[1] for r in c.execute("PRAGMA table_info(precheck)").fetchall()}
     if "comment_id" not in cols:                       # миграция со старой схемы (num,hash,ts)
         c.execute("ALTER TABLE precheck ADD COLUMN comment_id TEXT")
+    c.execute("""CREATE TABLE IF NOT EXISTS bx_comment(
+        cid TEXT PRIMARY KEY, num TEXT, item_id INTEGER, author TEXT, created TEXT, text TEXT)""")
+    c.commit(); c.close()
+
+
+def fetch_comments(item_id):
+    """Комментарии таймлайна заявки (КРОМЕ наших вердиктов) → [{cid,author,created,text}].
+    Тут сотрудники оставляют важный контекст (аванс согласован, оплата частями и т.п.)."""
+    try:
+        r = R._bx("crm.timeline.comment.list",
+                  {"filter": {"ENTITY_ID": item_id, "ENTITY_TYPE": "DYNAMIC_%d" % R.BX_ENTITY},
+                   "order": {"CREATED": "ASC"}})
+    except Exception:
+        return []
+    rows = r if isinstance(r, list) else (r.get("comments") or r.get("result") or [])
+    out = []
+    for it in rows:
+        txt = str(it.get("COMMENT") or "").strip()
+        if not txt or BOT_MARK in txt:                 # свои вердикты пропускаем
+            continue
+        out.append({"cid": str(it.get("ID")), "author": str(it.get("AUTHOR_ID") or ""),
+                    "created": str(it.get("CREATED") or "")[:19], "text": txt})
+    return out
+
+
+def store_comments(num, item_id, comments):
+    """Сохранить сотрудничьи комментарии в ядро (аудит + показ в карточке ЛК)."""
+    _ensure_table()
+    c = S._db()
+    for cm in comments:
+        c.execute("INSERT OR REPLACE INTO bx_comment VALUES(?,?,?,?,?,?)",
+                  (cm["cid"], str(num), item_id, cm["author"], cm["created"], cm["text"]))
     c.commit(); c.close()
 
 
@@ -186,8 +221,12 @@ def verdict(item, pays, read=True):
             sher.append("Возможный дубль: тот же БИН и сумма уже встречались в 1С (%d)" % len(dups))
     if not already and not binf:
         sher.append("Заявка не сматчена с оплатами/договором — проверить вручную")
+    # сотрудничьи комментарии из карточки — читаем и храним (там бывает важный контекст)
+    emp = fetch_comments(item["id"]) if item.get("id") else []
+    if emp:
+        store_comments(num, item["id"], emp)
     return {"id": item["id"], "num": num, "supplier": supplier, "amount": amount,
-            "buffett": buff, "sherlock": sher, "remarks": remarks}
+            "buffett": buff, "sherlock": sher, "remarks": remarks, "comments": emp}
 
 
 def comment_text(v):
@@ -210,6 +249,8 @@ def comment_text(v):
         L += ["  %d. %s" % (i, r) for i, r in enumerate(v["remarks"], 1)]
     else:
         L.append("✅ Без замечаний — можно к оплате")
+    if v.get("comments"):
+        L += ["", "💬 В карточке %d заметок сотрудников — учтите при решении" % len(v["comments"])]
     return "\n".join(L)
 
 

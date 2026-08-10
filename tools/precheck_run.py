@@ -17,6 +17,7 @@ def main():
     args = sys.argv[1:]
     post = "--post" in args
     read = "--read" in args or post          # при постинге договор дочитываем всегда
+    only_remarks = "--only-remarks" in args  # постить/печатать только заявки с замечаниями
     nums = [a for a in args if a.isdigit()]
     limit = int(nums[0]) if nums else 10
     if not S.BITRIX:
@@ -50,6 +51,8 @@ def main():
         if not it["num"]:
             continue
         v = P.verdict(it, pays, read=read)
+        if only_remarks and not v["remarks"]:
+            continue
         text = P.comment_text(v)
         h = hashlib.md5(text.encode("utf-8")).hexdigest()[:16]
         print("=" * 70)
