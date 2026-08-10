@@ -211,14 +211,29 @@ def verdict(item, pays, read=True):
             remarks.append("ИП превышает годовой лимит НДС: оборот ~%s ₸ (с этой оплатой) > %s ₸ — обязан встать на НДС" % (S.money(projected), S.money(NDS_LIMIT_IP)))
         elif projected > NDS_LIMIT_IP * 0.85:
             remarks.append("ИП близок к лимиту НДС: ~%s из %s ₸/год" % (S.money(projected), S.money(NDS_LIMIT_IP)))
-    # --- Шерлок ---
+    # --- Шерлок (со временным контекстом: отличить «оплачено, не подвинули» от задвоения) ---
     already = [p for p in pays if S._num_from(p[4]) == num]
     if already:
-        sher.append("По заявке уже проходили оплаты 1С: %d шт на %s ₸" % (len(already), S.money(sum(p[2] or 0 for p in already))))
+        dates = sorted(p[3] for p in already if p[3])
+        last = dates[-1] if dates else ""
+        days = ""
+        try:
+            days = " (%d дн назад)" % (datetime.now() - datetime.strptime(last[:10], "%Y-%m-%d")).days
+        except Exception:
+            pass
+        paid = S.money(sum(p[2] or 0 for p in already))
+        if len(already) >= 2:
+            sher.append("🔴 По заявке УЖЕ %d оплаты на %s ₸ (%s)%s — деньги могли уйти дважды" %
+                        (len(already), paid, ", ".join(dates), days))
+        else:
+            sher.append("Оплачено %s ₸ от %s%s. Если это ОНА — заявку в «Закрыто»; если планируется "
+                        "НОВАЯ оплата — это задвоение" % (paid, last, days))
     if binf:
         dups = [p for p in pays if p[6] == binf and abs((p[2] or 0) - amount) < 1]
-        if dups:
-            sher.append("Возможный дубль: тот же БИН и сумма уже встречались в 1С (%d)" % len(dups))
+        if len(dups) >= 2:
+            dd = sorted({p[3] for p in dups if p[3]})
+            sher.append("Возможный дубль по контрагенту: тот же БИН и сумма встречались %d раз (%s)" %
+                        (len(dups), ", ".join(dd)))
     if not already and not binf:
         sher.append("Заявка не сматчена с оплатами/договором — проверить вручную")
     # сотрудничьи комментарии из карточки — читаем и храним (там бывает важный контекст)
