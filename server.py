@@ -229,12 +229,16 @@ def _account_from(s):
 
 
 def _object_from(s):
-    """Объект/ЖК из назначения платежа (эвристика по AU/Атмо/KR/Аксай)."""
+    """Объект/ЖК из назначения платежа / названия заявки (латиница+кириллица, все ЖК холдинга)."""
     t = str(s or "").lower()
-    if "атмо" in t: return "Атмосфера"
-    if "aura" in t or re.search(r"\bau\s*\d|аура", t): return "Аура"
-    if "керуен" in t or re.search(r"\bkr\s*\d|keruen", t): return "Керуен"
-    if "аксай" in t or "aksai" in t: return "Аксай"
+    if "атмо" in t or "atmo" in t: return "Атмосфера"
+    if "aura" in t or "aура" in t or re.search(r"\bau\s*\d|аура", t): return "Аура"
+    if "керуен" in t or "keruen" in t or re.search(r"\bkr\s*\d", t): return "Керуен"
+    if "аксай" in t or "aksai" in t or "aqsai" in t: return "Аксай"
+    if "bion" in t or "бион" in t: return "BION"
+    if "amaia" in t or "амайа" in t or "амая" in t: return "AMAIA"
+    if "браво" in t or "bravo" in t: return "Браво"
+    if "неон" in t or "neon" in t: return "Неон"
     return ""
 
 
@@ -458,6 +462,7 @@ def bdds_data():
     c = _db()
     sm = c.execute("SELECT object,budget,canon FROM smeta").fetchall()
     nk = c.execute("SELECT num,object,notes,title,total,article FROM nakopitel").fetchall()
+    zs = c.execute("SELECT number,title FROM zayavka").fetchall()          # ВСЕ заявки Bitrix — мост к объекту
     pays = c.execute("SELECT amount,purpose FROM flow WHERE kind='out' AND supplier=1").fetchall()
     recs = c.execute("SELECT amount,purpose FROM flow WHERE kind='receipt'").fetchall()
     meta = dict(c.execute("SELECT k,v FROM meta").fetchall()); c.close()
@@ -465,39 +470,51 @@ def bdds_data():
     smeta_objs = set()
     for obj, budget, canon in sm:
         smeta_budget[obj][canon] += budget or 0; smeta_objs.add(obj)
+    # № заявки → (объект, статья-канон) из названия «№ / компания / поставщик / ОБЪЕКТ / РАБОТА / …» — покрывает ВСЕ заявки
+    z_obj, z_canon = {}, {}
+    for number, title in zs:
+        n = str(number or "").strip() or _num_from(title or "")
+        if n:
+            z_obj[n] = _object_from(title or "") or ""
+            z_canon[n] = _canon_article(title or "")
+    # прочитанные договоры: точный объект/статья (ИИ) + сумма договора
     nk_by_num = {}
     for num, obj, notes, title, total, article in nk:
-        canon = _canon_article(article or (notes or "") + " " + (title or ""))   # приоритет — статья от ИИ
-        nk_by_num[str(num)] = {"object": obj or _object_from(title or "") or "—", "canon": canon, "total": total or 0}
+        n = str(num)
+        canon = _canon_article(article) if article else (z_canon.get(n) or _canon_article((notes or "") + " " + (title or "")))
+        nk_by_num[n] = {"object": obj or z_obj.get(n) or _object_from(title or "") or "—", "canon": canon, "total": total or 0}
+
+    def attr(purpose):
+        n = _num_from(purpose)
+        info = nk_by_num.get(n)
+        if info:
+            return info["object"] or "—", info["canon"]
+        return (z_obj.get(n) or _object_from(purpose) or "—"), (z_canon.get(n) or _canon_article(purpose))
+
     contr, opl = defaultdict(float), defaultdict(float)       # (object,canon) →
-    obj_paid, obj_done, obj_contr, obj_unalloc = (defaultdict(float) for _ in range(4))
+    obj_paid, obj_done, obj_contr = (defaultdict(float) for _ in range(3))
     for info in nk_by_num.values():
         contr[(info["object"], info["canon"])] += info["total"]; obj_contr[info["object"]] += info["total"]
     for amt, purpose in pays:
-        info = nk_by_num.get(_num_from(purpose))
-        o = (info["object"] if info else _object_from(purpose)) or "—"
-        obj_paid[o] += amt or 0
-        if info:
-            opl[(info["object"], info["canon"])] += amt or 0
-        else:
-            obj_unalloc[o] += amt or 0                        # платёж без прочитанного договора → нераспределено
+        o, cn = attr(purpose); obj_paid[o] += amt or 0; opl[(o, cn)] += amt or 0
     for amt, purpose in recs:
-        obj_done[(_object_from(purpose) or "—")] += amt or 0
-    objects = set(smeta_objs) | {i["object"] for i in nk_by_num.values()} | set(obj_paid)
-    objects.discard("—")
+        o, _cn = attr(purpose); obj_done[o] += amt or 0
+    objects = set(smeta_objs) | set(obj_paid) | {i["object"] for i in nk_by_num.values()}
     out = []
     for o in sorted(objects):
-        canons = set(smeta_budget.get(o, {})) | {cn for (oo, cn) in contr if oo == o}
+        canons = set(smeta_budget.get(o, {})) | {cn for (oo, cn) in contr if oo == o} | {cn for (oo, cn) in opl if oo == o}
         arts = []
         for cn in canons:
             b = smeta_budget.get(o, {}).get(cn, 0.0); ct = contr.get((o, cn), 0.0); op = opl.get((o, cn), 0.0)
+            if not (b or ct or op):
+                continue
             arts.append({"article": cn, "budget": b, "contracted": ct, "oplacheno": op, "ostatok": (b or ct) - op})
-        out.append({"object": o, "has_smeta": o in smeta_objs,
+        out.append({"object": ("(объект не распознан)" if o == "—" else o), "has_smeta": o in smeta_objs,
                     "budget": sum(smeta_budget.get(o, {}).values()),
                     "contracted": obj_contr.get(o, 0.0), "oplacheno": obj_paid.get(o, 0.0),
-                    "vypolneno": obj_done.get(o, 0.0), "unalloc": obj_unalloc.get(o, 0.0),
-                    "articles": sorted(arts, key=lambda x: -(x["budget"] or x["contracted"]))})
-    out.sort(key=lambda x: -(x["budget"] or x["contracted"] or x["oplacheno"]))
+                    "vypolneno": obj_done.get(o, 0.0),
+                    "articles": sorted(arts, key=lambda x: -(x["oplacheno"] or x["budget"] or x["contracted"]))})
+    out.sort(key=lambda x: -(x["oplacheno"] or x["budget"] or x["contracted"]))
     return {"objects": out, "smeta_objs": sorted(smeta_objs), "smeta_ts": meta.get("smeta_ts", "")}
 
 
@@ -1155,7 +1172,6 @@ function rBdds(v){
           +'<td class=num style=color:#0e7490>'+money(a.oplacheno)+'</td><td class=num style=color:#cbd5e1>—</td>'
           +'<td class=num style=color:#b91c1c>'+money(a.ostatok)+'</td></tr>';
       });
-      if(o.unalloc>0){body+='<tr class="bdart a'+oi+'" style="display:none"><td style="padding-left:34px;color:#94a3b8">· не распределено по статьям (договор не прочитан)</td><td class=num>—</td><td class=num>—</td><td class=num style=color:#0e7490>'+money(o.unalloc)+'</td><td class=num>—</td><td class=num>—</td></tr>';}
     });
     t.innerHTML='<thead><tr><th>Объект / статья</th><th class=num>Бюджет</th><th class=num>Договоры</th><th class=num>Оплачено</th><th class=num>Выполнено</th><th class=num>Остаток</th></tr></thead><tbody>'+body+'</tbody>';
     wrap.appendChild(t);host.appendChild(wrap);
@@ -1167,7 +1183,7 @@ function rBdds(v){
         t.querySelectorAll('tr.a'+i).forEach(function(x){x.style.display=open?'none':'';});
       };
     });
-    host.appendChild(el('div','note','Бюджет — из сметы (пока Аура). Договоры — из прочитанных договоров. Выполнено — 1С-поступления (АВР, по объекту). Остаток = (Бюджет или Договор) − Оплачено. «Не распределено» = оплаты по объекту, где договор ещё не прочитан.'));
+    host.appendChild(el('div','note','Оплачено/статья — все платежи 1С, разложенные по объекту и виду работ через ЗАЯВКУ Bitrix (в названии заявки есть объект и работа). Договоры — из прочитанных договоров (пока мало). Бюджет — из сметы (пока Аура). Выполнено — 1С-поступления (АВР). Статьи уточняются по мере чтения договоров (ИИ).'));
   }).catch(function(e){host.innerHTML='<div class=err>Ошибка БДДС: '+e+'</div>';});
 }
 
