@@ -33,10 +33,11 @@ BASE = USER = PASS = ""
 
 
 def _load_config():
-    """bases.json: {months, bases:[{company, base, user, pass}]}. Фолбэк — одиночная база из .env."""
+    """bases.json: {months, push_url, push_key, bases:[{company, base, user, pass}]}. Фолбэк — .env."""
     try:
         cfg = json.load(open(os.path.join(HERE, "bases.json"), encoding="utf-8-sig"))  # -sig: терпит BOM
-        return int(cfg.get("months", 1)), cfg.get("bases", [])
+        push = {"url": cfg.get("push_url", ""), "key": cfg.get("push_key", "")}
+        return int(cfg.get("months", 1)), cfg.get("bases", []), push
     except Exception:
         env = {}
         try:
@@ -49,7 +50,7 @@ def _load_config():
         return int(env.get("MONTHS", "1") or "1"), [{
             "company": "(из .env)", "base": env.get("BASE", ""),
             "user": env.get("USER", ""), "pass": env.get("PASS", ""),
-        }]
+        }], {"url": env.get("PUSH_URL", ""), "key": env.get("PUSH_KEY", "")}
 
 
 def _req(url):
@@ -124,7 +125,7 @@ def pull(docs, since, kind):
 
 def main():
     global BASE, USER, PASS
-    months, bases = _load_config()
+    months, bases, push = _load_config()
     since = (datetime.now() - timedelta(days=30 * months)).strftime("%Y-%m-%dT00:00:00")
     out_all, in_all, rec_all = [], [], []
     ncontr = 0
@@ -227,6 +228,26 @@ def main():
         print(f"  {money(s):>16} ₸  {nm[key]}")
 
     print(f"\nГотово. Ядро: {DB} (таблица flow — все базы вместе, поле company).")
+
+    # ---- ОТПРАВКА среза на веб-ЛК (push), если задан push_url в bases.json ----
+    if push.get("url"):
+        payload = {
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "months": months,
+            "flow": [{
+                "company": p["company"], "kind": kind, "doc": p["doc"], "number": p["number"],
+                "date": p["date"], "bin": p["bin"], "name": p["name"], "amount": p["amount"],
+                "vidop": p["vidop"], "supplier": 1 if p.get("supplier") else 0,
+                "purpose": p["purpose"], "comment": p["comment"], "dogovor_key": p["dogovor_key"],
+            } for kind, lst in (("out", out_all), ("in", in_all), ("receipt", rec_all)) for p in lst],
+        }
+        try:
+            req = urllib.request.Request(push["url"], data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json", "X-Service-Key": push.get("key", "")})
+            with urllib.request.urlopen(req, timeout=90) as r:
+                print(f"✅ Отправлено на {push['url']}: {json.load(r)}")
+        except Exception as e:
+            print(f"⚠ Push не удался: {e}")
 
 
 if __name__ == "__main__":
