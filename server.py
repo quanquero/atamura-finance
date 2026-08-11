@@ -1167,27 +1167,25 @@ function rNk(v){
 }
 
 function openZayavka(num){
-  openModal('<div class=nkhd><div class=t>Заявка №'+esc(num)+'</div><div class=s>загрузка из Bitrix…</div></div><div id=zkbody class=note>тяну документы и оплаты…</div>');
+  openModal('<div id=zkbody class=note style="min-height:120px;padding:20px">Заявка №'+esc(num)+' — тяну документы и оплаты из Bitrix… <span style=color:#94a3b8>(пара секунд)</span></div>');
   fetch('zayavka-card?num='+encodeURIComponent(num),{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
     var body=document.getElementById('zkbody');if(!body)return;
-    if(d.error){body.innerHTML='<div class=err>'+esc(d.error)+'</div>';return;}
-    var hd=body.parentNode.querySelector('.nkhd');
-    if(hd){hd.querySelector('.t').textContent='Заявка №'+d.num;
-      hd.querySelector('.s').innerHTML=esc((d.title||'').slice(0,90))+((d.bx_portal&&d.id)?(' · <a href="'+d.bx_portal+'/crm/type/'+d.bx_entity+'/details/'+d.id+'/" target=_blank style="color:#7dd3fc">открыть в Bitrix →</a>'):'');}
-    var h='<h4>📎 Документы заявки</h4>';
+    if(d.error){body.innerHTML='<div class=err style="padding:16px">'+esc(d.error)+'</div>';return;}
+    var link=(d.bx_portal&&d.id)?(' · <a href="'+d.bx_portal+'/crm/type/'+d.bx_entity+'/details/'+d.id+'/" target=_blank style="color:#7dd3fc">открыть в Bitrix →</a>'):'';
+    var h='<div class=nkhd><div class=t>Заявка №'+esc(d.num)+'</div><div class=s>'+esc((d.title||'').slice(0,100))+link+'</div></div><div style="padding:14px 16px">';
     var docs=d.docs||[];
-    if(!docs.length){h+='<div class=note>вложений нет</div>';}
-    else{h+='<div class=tblscroll style="max-height:24vh"><table><tbody>'+docs.map(function(dc){return '<tr><td style="color:#0e7490;font-weight:600;white-space:nowrap">'+esc(dc.label)+'</td><td>'+esc(dc.name||'—')+'</td></tr>';}).join('')+'</tbody></table></div>';}
+    h+='<h4>📎 Документы заявки</h4>';
+    h+=docs.length?('<div class=tblscroll style="max-height:22vh"><table><tbody>'+docs.map(function(dc){return '<tr><td style="color:#0e7490;font-weight:600;white-space:nowrap">'+esc(dc.label)+'</td><td>'+esc(dc.name||'файл')+'</td></tr>';}).join('')+'</tbody></table></div>'):'<div class=note>вложений нет</div>';
     var nk=d.nakopitel;
     h+='<h4>💰 Условия договора</h4>';
     if(nk){h+='<div class=nknote>Договор '+esc(nk.contract_no||'—')+' · <b>'+money(nk.total||0)+' ₸</b> · статья: <b>'+esc(nk.article||'—')+'</b> · объект: '+esc(nk.object||'—')+(nk.ochered?(' · '+esc(nk.ochered)):'')+(nk.retention?(' · удерж. '+money(nk.retention)):'')+(nk.barter?' · бартер':'')+(nk.notes?('<div style="margin-top:5px;color:#64748b">📄 '+esc(nk.notes)+'</div>'):'')+'</div>';}
     else{h+='<div class=note>договор не прочитан. <button class=zkread style="padding:5px 12px;border:0;border-radius:7px;background:#0ea5e9;color:#fff;cursor:pointer;font-weight:600">Прочитать договор</button> <span class=zkmsg style="font-size:12px;color:#94a3b8"></span></div>';}
     var pr=(d.payments||[]).map(function(p){return '<tr><td>'+esc(p.date||'')+'</td><td>'+esc(p.object||'—')+'</td><td>'+esc(p.account||'—')+'</td><td class=num>'+money(p.amount)+'</td></tr>';}).join('')||'<tr><td colspan=4 style=color:#94a3b8>нет оплат 1С по заявке</td></tr>';
-    h+='<h4>Оплаты 1С по заявке</h4><div class=tblscroll style="max-height:24vh"><table><thead><tr><th>Дата</th><th>Объект</th><th>Счёт</th><th class=num>Сумма</th></tr></thead><tbody>'+pr+'</tbody></table></div>';
-    body.innerHTML=h;
+    h+='<h4>Оплаты 1С по заявке</h4><div class=tblscroll style="max-height:22vh"><table><thead><tr><th>Дата</th><th>Объект</th><th>Счёт</th><th class=num>Сумма</th></tr></thead><tbody>'+pr+'</tbody></table></div></div>';
+    body.className='';body.style.padding='0';body.innerHTML=h;
     var rb=body.querySelector('.zkread'),msg=body.querySelector('.zkmsg');
     if(rb){rb.onclick=function(){rb.disabled=true;nkRead(num,'',function(s,tx){if(msg)msg.textContent=tx;},function(res){openZayavka(num);});};}
-  }).catch(function(e){var b=document.getElementById('zkbody');if(b)b.innerHTML='<div class=err>ошибка: '+e+'</div>';});
+  }).catch(function(e){var b=document.getElementById('zkbody');if(b)b.innerHTML='<div class=err style="padding:16px">ошибка: '+e+'</div>';});
 }
 
 function rBdds(v){
