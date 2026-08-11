@@ -449,6 +449,55 @@ def store_smeta(payload):
     return n
 
 
+def bdds_data():
+    """БДДС по объектам: объект → статья (канон) × Бюджет(смета) / Договор / Оплачено / Остаток,
+    + Выполнено (1С-поступления) на уровне объекта. Три ноги + бюджет там, где смета есть."""
+    c = _db()
+    sm = c.execute("SELECT object,budget,canon FROM smeta").fetchall()
+    nk = c.execute("SELECT num,object,notes,title,total FROM nakopitel").fetchall()
+    pays = c.execute("SELECT amount,purpose FROM flow WHERE kind='out' AND supplier=1").fetchall()
+    recs = c.execute("SELECT amount,purpose FROM flow WHERE kind='receipt'").fetchall()
+    meta = dict(c.execute("SELECT k,v FROM meta").fetchall()); c.close()
+    smeta_budget = defaultdict(lambda: defaultdict(float))    # object → canon → бюджет
+    smeta_objs = set()
+    for obj, budget, canon in sm:
+        smeta_budget[obj][canon] += budget or 0; smeta_objs.add(obj)
+    nk_by_num = {}
+    for num, obj, notes, title, total in nk:
+        canon = _canon_article((notes or "") + " " + (title or ""))
+        nk_by_num[str(num)] = {"object": obj or _object_from(title or "") or "—", "canon": canon, "total": total or 0}
+    contr, opl = defaultdict(float), defaultdict(float)       # (object,canon) →
+    obj_paid, obj_done, obj_contr, obj_unalloc = (defaultdict(float) for _ in range(4))
+    for info in nk_by_num.values():
+        contr[(info["object"], info["canon"])] += info["total"]; obj_contr[info["object"]] += info["total"]
+    for amt, purpose in pays:
+        info = nk_by_num.get(_num_from(purpose))
+        o = (info["object"] if info else _object_from(purpose)) or "—"
+        obj_paid[o] += amt or 0
+        if info:
+            opl[(info["object"], info["canon"])] += amt or 0
+        else:
+            obj_unalloc[o] += amt or 0                        # платёж без прочитанного договора → нераспределено
+    for amt, purpose in recs:
+        obj_done[(_object_from(purpose) or "—")] += amt or 0
+    objects = set(smeta_objs) | {i["object"] for i in nk_by_num.values()} | set(obj_paid)
+    objects.discard("—")
+    out = []
+    for o in sorted(objects):
+        canons = set(smeta_budget.get(o, {})) | {cn for (oo, cn) in contr if oo == o}
+        arts = []
+        for cn in canons:
+            b = smeta_budget.get(o, {}).get(cn, 0.0); ct = contr.get((o, cn), 0.0); op = opl.get((o, cn), 0.0)
+            arts.append({"article": cn, "budget": b, "contracted": ct, "oplacheno": op, "ostatok": (b or ct) - op})
+        out.append({"object": o, "has_smeta": o in smeta_objs,
+                    "budget": sum(smeta_budget.get(o, {}).values()),
+                    "contracted": obj_contr.get(o, 0.0), "oplacheno": obj_paid.get(o, 0.0),
+                    "vypolneno": obj_done.get(o, 0.0), "unalloc": obj_unalloc.get(o, 0.0),
+                    "articles": sorted(arts, key=lambda x: -(x["budget"] or x["contracted"]))})
+    out.sort(key=lambda x: -(x["budget"] or x["contracted"] or x["oplacheno"]))
+    return {"objects": out, "smeta_objs": sorted(smeta_objs), "smeta_ts": meta.get("smeta_ts", "")}
+
+
 def store_nakopitel(num, bin_, terms, title=""):
     """Сохранить условия договора (прочитанные ИИ) в кеш накопителя."""
     t = terms or {}
@@ -692,7 +741,7 @@ function money(n){return (Math.round(n||0)).toLocaleString('ru-RU').replace(/,/g
 function el(t,c,h){var e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;}
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');}
 var D=null, tab='obzor';
-var TABS=[['obzor','Обзор'],['pay','Платежи 1С'],['sved','Сведение'],['nk','Накопитель'],['ctrl','Контроль']];
+var TABS=[['obzor','Обзор'],['pay','Платежи 1С'],['sved','Сведение'],['nk','Накопитель'],['bdds','БДДС'],['ctrl','Контроль']];
 
 fetch('data.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){D=d;boot();})
   .catch(function(e){app.className='';app.innerHTML='<div class=wrap><div class=err>Ошибка загрузки данных: '+e+'</div></div>';});
@@ -718,7 +767,7 @@ function boot(){
     +'<span style="color:#64748b">· индекс '+esc(m.idx_ts||'—')+'</span>';
   app.appendChild(foot);
 }
-function render(){var v=document.getElementById('view');v.innerHTML='';({obzor:rObzor,pay:rPay,sved:rSved,nk:rNk,ctrl:rCtrl}[tab])(v);}
+function render(){var v=document.getElementById('view');v.innerHTML='';({obzor:rObzor,pay:rPay,sved:rSved,nk:rNk,bdds:rBdds,ctrl:rCtrl}[tab])(v);}
 
 function card(inner){var c=el('div','card');if(typeof inner=='string')c.innerHTML=inner;else c.appendChild(inner);return c;}
 function h2(t){return el('h2',null,t);}
@@ -1071,6 +1120,51 @@ function rNk(v){
   load();
 }
 
+function rBdds(v){
+  v.appendChild(h2('БДДС по объектам'));
+  v.appendChild(el('div','note','Три ноги: Договоры (план) · Выполнено (АВР из 1С-поступлений) · Оплачено (1С). Где есть смета — колонка Бюджет. Клик по объекту раскрывает статьи.'));
+  var host=el('div');host.innerHTML='<div class=note>Загрузка БДДС…</div>';v.appendChild(host);
+  fetch('bdds.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+    host.innerHTML='';
+    var objs=(d&&d.objects)||[];
+    if(!objs.length){host.innerHTML='<div class=cashln>Нет данных. Прочитай договоры во вкладке «Накопитель» и/или залей смету (<b>tools/smeta_import.py --post</b>).</div>';return;}
+    var tB=0,tC=0,tO=0,tV=0;objs.forEach(function(o){tB+=o.budget;tC+=o.contracted;tO+=o.oplacheno;tV+=o.vypolneno;});
+    var strip=el('div','svet wide');
+    function tl(cls,val,lbl){return '<div class="sv '+cls+'"><div class=n style="font-size:16px">'+val+'</div><div class=l>'+lbl+'</div></div>';}
+    strip.innerHTML=tl('bl',money(tB)+' ₸','Бюджет (смета)')+tl('nu',money(tC)+' ₸','Договоры')+tl('g',money(tO)+' ₸','Оплачено 1С')+tl('y',money(tV)+' ₸','Выполнено (АВР)');
+    host.appendChild(strip);
+    var wrap=el('div','tblscroll');wrap.style.marginTop='12px';var t=el('table');
+    var body='';
+    objs.forEach(function(o,oi){
+      var rest=(o.budget||o.contracted)-o.oplacheno;
+      body+='<tr class=bdobj data-i="'+oi+'" style="cursor:pointer;background:#f8fafc;font-weight:700">'
+        +'<td>▸ '+esc(o.object)+(o.has_smeta?' <span class="pill ok" style="font-weight:600">смета</span>':'')+'</td>'
+        +'<td class=num>'+(o.budget?money(o.budget):'—')+'</td><td class=num>'+money(o.contracted)+'</td>'
+        +'<td class=num style=color:#0e7490>'+money(o.oplacheno)+'</td><td class=num style=color:#7c3aed>'+money(o.vypolneno)+'</td>'
+        +'<td class=num style=color:#b91c1c><b>'+money(rest)+'</b></td></tr>';
+      o.articles.forEach(function(a){
+        body+='<tr class="bdart a'+oi+'" style="display:none">'
+          +'<td style="padding-left:34px;color:#475569">'+esc(a.article)+'</td>'
+          +'<td class=num>'+(a.budget?money(a.budget):'—')+'</td><td class=num>'+money(a.contracted)+'</td>'
+          +'<td class=num style=color:#0e7490>'+money(a.oplacheno)+'</td><td class=num style=color:#cbd5e1>—</td>'
+          +'<td class=num style=color:#b91c1c>'+money(a.ostatok)+'</td></tr>';
+      });
+      if(o.unalloc>0){body+='<tr class="bdart a'+oi+'" style="display:none"><td style="padding-left:34px;color:#94a3b8">· не распределено по статьям (договор не прочитан)</td><td class=num>—</td><td class=num>—</td><td class=num style=color:#0e7490>'+money(o.unalloc)+'</td><td class=num>—</td><td class=num>—</td></tr>';}
+    });
+    t.innerHTML='<thead><tr><th>Объект / статья</th><th class=num>Бюджет</th><th class=num>Договоры</th><th class=num>Оплачено</th><th class=num>Выполнено</th><th class=num>Остаток</th></tr></thead><tbody>'+body+'</tbody>';
+    wrap.appendChild(t);host.appendChild(wrap);
+    t.querySelectorAll('tr.bdobj').forEach(function(tr){
+      tr.onclick=function(){
+        var i=tr.getAttribute('data-i'),open=tr.getAttribute('data-open')==='1';
+        tr.setAttribute('data-open',open?'0':'1');
+        var td=tr.querySelector('td');td.innerHTML=td.innerHTML.replace(open?'▾':'▸',open?'▸':'▾');
+        t.querySelectorAll('tr.a'+i).forEach(function(x){x.style.display=open?'none':'';});
+      };
+    });
+    host.appendChild(el('div','note','Бюджет — из сметы (пока Аура). Договоры — из прочитанных договоров. Выполнено — 1С-поступления (АВР, по объекту). Остаток = (Бюджет или Договор) − Оплачено. «Не распределено» = оплаты по объекту, где договор ещё не прочитан.'));
+  }).catch(function(e){host.innerHTML='<div class=err>Ошибка БДДС: '+e+'</div>';});
+}
+
 function rCtrl(v){
   var g={};D.payments.forEach(function(p){if(!p.bin)return;var k=p.company+'|'+p.bin+'|'+Math.round(p.amount)+'|'+p.date;(g[k]=g[k]||[]).push(p);});
   var dub=Object.keys(g).map(function(k){return g[k];}).filter(function(a){return a.length>1;}).map(function(a){return {company:a[0].company,name:a[0].name,bin:a[0].bin,amount:a[0].amount,date:a[0].date,n:a.length};});
@@ -1257,6 +1351,9 @@ class H(http.server.BaseHTTPRequestHandler):
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path == "/nakopitel.json":
             try: self._send(json.dumps(nakopitel_data(), ensure_ascii=False), "application/json")
+            except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
+        elif self.path == "/bdds.json":
+            try: self._send(json.dumps(bdds_data(), ensure_ascii=False), "application/json")
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path.startswith("/nk-read"):
             try:

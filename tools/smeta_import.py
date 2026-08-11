@@ -87,16 +87,23 @@ def _m(n):
 
 
 def _post(payload):
-    import urllib.request
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    import server as S
-    if not S.KEY:
-        print("SERVICE_KEY не задан"); return
-    url = "https://finance.atamura.group/api/smeta"
+    import urllib.request, ssl
+    key = os.environ.get("SERVICE_KEY", "")
+    if not key:
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            import server as S
+            key = S.KEY
+        except Exception:
+            pass
+    if not key:
+        print("SERVICE_KEY не задан (env SERVICE_KEY=… или .env фин-репо)"); return
+    url = os.environ.get("FINANCE_URL", "https://finance.atamura.group") + "/api/smeta"
+    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                 headers={"Content-Type": "application/json", "X-Service-Key": S.KEY})
+                                 headers={"Content-Type": "application/json", "X-Service-Key": key})
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with urllib.request.urlopen(req, timeout=60, context=ctx) as r:
             print("Отправлено:", json.load(r))
     except Exception as e:
         print("Ошибка отправки:", e)
