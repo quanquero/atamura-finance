@@ -842,30 +842,56 @@ function lineChart(host,data){
 }
 
 function rObzor(v){
-  var k=D.kpi,c=D.counts,saldo=k.in-k.out;
-  var kp=el('div','kpis');
-  kp.innerHTML=kpiTile('Отток (исходящие)',money(k.out)+' ₸')+kpiTile('Приток (входящие)',money(k.in)+' ₸')+
-    kpiTile('Сальдо',(saldo>=0?'+':'')+money(saldo)+' ₸',saldo>=0?'pos':'negv')+kpiTile('Оплаты поставщикам',money(k.sup)+' ₸');
-  v.appendChild(kp);
-  v.appendChild(h2('Движение денег по дням (отток / приток)'));
-  var ch=card('');var host=el('div','chartwrap');ch.appendChild(host);
-  ch.appendChild(el('div','clg','<span class=k><span class=sw style="background:#ea580c"></span>отток</span><span class=k><span class=sw style="background:#0891b2"></span>приток</span><span class=k><span class=sw style="background:#6d28d9"></span>сальдо (день)</span><span style=color:#94a3b8>наведи курсор — суммы и крупные платежи дня</span>'));
-  v.appendChild(ch);lineChart(host,D.series);
-  v.appendChild(h2('Сведение с Bitrix'));
-  var sv=el('div','svet wide');
-  sv.innerHTML=svc('g',c.matched,'Оплачено (есть платёж 1С)')+svc('y',c.reserve,'Одобрено, ждёт 1С')+svc('bl',c.in_progress,'В работе')+svc('nu',c.rejected,'Отказано')+svc('r',c.nz_orphan,'Оплата без заявки (нигде нет)');
-  v.appendChild(sv);
-  var byco={},bycat={};
-  D.payments.forEach(function(p){byco[p.company]=(byco[p.company]||0)+p.amount;bycat[p.cat]=(bycat[p.cat]||0)+p.amount;});
-  var comp=Object.keys(byco).map(function(k){return [k,byco[k]];}).sort(function(a,b){return b[1]-a[1];});
-  var top=comp.slice(0,7),rest=comp.slice(7).reduce(function(s,x){return s+x[1];},0);if(rest>0)top.push(['прочее',rest]);
-  var pal=['#0e7490','#c2410c','#7c3aed','#0891b2','#b45309','#4d7c0f','#be123c'],ccol={};top.forEach(function(x,i){ccol[x[0]]=pal[i]||'#cbd5e1';});ccol['прочее']='#cbd5e1';
-  var catcol={'подряд':'#0e7490','поставка':'#c2410c','услуга':'#7c3aed','прочее':'#94a3b8'};
-  var catp=['подряд','поставка','услуга','прочее'].filter(function(k){return bycat[k]>0;}).map(function(k){return [k,bycat[k]];});
-  v.appendChild(h2('Отток по дочкам'));
-  v.appendChild(card('<div class=donutwrap>'+donutSVG(top,ccol)+legend(top,ccol)+'</div>'));
-  v.appendChild(h2('Разрез по типу расхода'));
-  v.appendChild(card('<div class=donutwrap>'+donutSVG(catp,catcol)+legend(catp,catcol)+'</div>'));
+  var maxD=(D.series&&D.series.length)?D.series[D.series.length-1].d:'';
+  function cut(days){ if(!days||!maxD)return ''; var d=new Date(maxD+'T12:00:00'); d.setDate(d.getDate()-days);
+    var m=d.getMonth()+1, day=d.getDate(); return d.getFullYear()+'-'+(m<10?'0':'')+m+'-'+(day<10?'0':'')+day; }
+  var PRESETS=[['1 месяц',30],['2 месяца',60],['3 месяца (всё)',null]];
+  var bar=el('div');bar.style.cssText='display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:12px';
+  var lbl=el('span',null,'Период:');lbl.style.cssText='color:#94a3b8;font-size:13px;margin-right:4px';bar.appendChild(lbl);
+  var body=el('div');
+  function draw(days){
+    var c0=cut(days),c=D.counts;
+    var fs=D.series.filter(function(s){return !c0||s.d>=c0;});
+    var fp=D.payments.filter(function(p){return !c0||(p.date||'')>=c0;});
+    var kOut=fs.reduce(function(s,x){return s+x.out;},0),kIn=fs.reduce(function(s,x){return s+x.in;},0),
+        kSup=fp.reduce(function(s,p){return s+p.amount;},0),saldo=kIn-kOut;
+    body.innerHTML='';
+    var kp=el('div','kpis');
+    kp.innerHTML=kpiTile('Отток (исходящие)',money(kOut)+' ₸')+kpiTile('Приток (входящие)',money(kIn)+' ₸')+
+      kpiTile('Сальдо',(saldo>=0?'+':'')+money(saldo)+' ₸',saldo>=0?'pos':'negv')+kpiTile('Оплаты поставщикам',money(kSup)+' ₸');
+    body.appendChild(kp);
+    body.appendChild(h2('Движение денег по дням (отток / приток)'));
+    var ch=card('');var host=el('div','chartwrap');ch.appendChild(host);
+    ch.appendChild(el('div','clg','<span class=k><span class=sw style="background:#ea580c"></span>отток</span><span class=k><span class=sw style="background:#0891b2"></span>приток</span><span class=k><span class=sw style="background:#6d28d9"></span>сальдо (день)</span><span style=color:#94a3b8>наведи курсор — суммы и крупные платежи дня</span>'));
+    body.appendChild(ch);lineChart(host,fs);
+    body.appendChild(h2('Сведение с Bitrix'));
+    var sv=el('div','svet wide');
+    sv.innerHTML=svc('g',c.matched,'Оплачено (есть платёж 1С)')+svc('y',c.reserve,'Одобрено, ждёт 1С')+svc('bl',c.in_progress,'В работе')+svc('nu',c.rejected,'Отказано')+svc('r',c.nz_orphan,'Оплата без заявки (нигде нет)');
+    body.appendChild(sv);
+    var byco={},bycat={};
+    fp.forEach(function(p){byco[p.company]=(byco[p.company]||0)+p.amount;bycat[p.cat]=(bycat[p.cat]||0)+p.amount;});
+    var comp=Object.keys(byco).map(function(k){return [k,byco[k]];}).sort(function(a,b){return b[1]-a[1];});
+    var top=comp.slice(0,7),rest=comp.slice(7).reduce(function(s,x){return s+x[1];},0);if(rest>0)top.push(['прочее',rest]);
+    var pal=['#0e7490','#c2410c','#7c3aed','#0891b2','#b45309','#4d7c0f','#be123c'],ccol={};top.forEach(function(x,i){ccol[x[0]]=pal[i]||'#cbd5e1';});ccol['прочее']='#cbd5e1';
+    var catcol={'подряд':'#0e7490','поставка':'#c2410c','услуга':'#7c3aed','прочее':'#94a3b8'};
+    var catp=['подряд','поставка','услуга','прочее'].filter(function(k){return bycat[k]>0;}).map(function(k){return [k,bycat[k]];});
+    body.appendChild(h2('Отток по дочкам'));
+    body.appendChild(card('<div class=donutwrap>'+donutSVG(top,ccol)+legend(top,ccol)+'</div>'));
+    body.appendChild(h2('Разрез по типу расхода'));
+    body.appendChild(card('<div class=donutwrap>'+donutSVG(catp,catcol)+legend(catp,catcol)+'</div>'));
+  }
+  PRESETS.forEach(function(pr){
+    var b=el('button',null,pr[0]);
+    b.style.cssText='background:#0f2233;border:1px solid #334155;color:#cbd5e1;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px';
+    b.onclick=function(){
+      Array.prototype.forEach.call(bar.querySelectorAll('button'),function(x){x.style.background='#0f2233';x.style.color='#cbd5e1';});
+      b.style.background='#0ea5e9';b.style.color='#fff';draw(pr[1]);
+    };
+    bar.appendChild(b);
+  });
+  v.appendChild(bar);v.appendChild(body);
+  var btns=bar.querySelectorAll('button');if(btns.length){btns[btns.length-1].style.background='#0ea5e9';btns[btns.length-1].style.color='#fff';}
+  draw(null);
 }
 
 function rPay(v){
