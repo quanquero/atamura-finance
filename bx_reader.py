@@ -126,9 +126,11 @@ def read_purpose(item, purpose, instruction, schema):
 
 
 # --- лёгкая схема: статья из Тех.требования (дёшево, для всех заявок) ---
+_STR = {"type": "string"}
+_NUM = {"type": "number"}
 ARTICLE_JSON_SCHEMA = {
     "type": "object",
-    "properties": {"article": _S, "object": _S, "ochered": _S, "work_desc": _S},
+    "properties": {"article": _STR, "object": _STR, "ochered": _STR, "work_desc": _STR},
     "required": ["article", "object", "ochered", "work_desc"],
     "additionalProperties": False,
 }
@@ -142,8 +144,8 @@ ARTICLE_INSTRUCTION = (
 # --- АВР → выполнено (принятые работы, per заявка) ---
 AVR_JSON_SCHEMA = {
     "type": "object",
-    "properties": {"vypolneno_sum": _N, "act_no": _S, "act_date": _S,
-                   "all_signed": {"type": "boolean"}, "notes": _S},
+    "properties": {"vypolneno_sum": _NUM, "act_no": _STR, "act_date": _STR,
+                   "all_signed": {"type": "boolean"}, "notes": _STR},
     "required": ["vypolneno_sum", "act_no", "act_date", "all_signed", "notes"],
     "additionalProperties": False,
 }
