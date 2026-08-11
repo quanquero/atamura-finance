@@ -96,6 +96,9 @@ def _db():
     zcols = {r[1] for r in c.execute("PRAGMA table_info(zayavka)").fetchall()}
     if "company" not in zcols:
         c.execute("ALTER TABLE zayavka ADD COLUMN company TEXT")
+    nkcols = {r[1] for r in c.execute("PRAGMA table_info(nakopitel)").fetchall()}
+    if "article" not in nkcols:                    # вид работ (статья) — ИИ извлекает из договора
+        c.execute("ALTER TABLE nakopitel ADD COLUMN article TEXT")
     return c
 
 
@@ -454,7 +457,7 @@ def bdds_data():
     + Выполнено (1С-поступления) на уровне объекта. Три ноги + бюджет там, где смета есть."""
     c = _db()
     sm = c.execute("SELECT object,budget,canon FROM smeta").fetchall()
-    nk = c.execute("SELECT num,object,notes,title,total FROM nakopitel").fetchall()
+    nk = c.execute("SELECT num,object,notes,title,total,article FROM nakopitel").fetchall()
     pays = c.execute("SELECT amount,purpose FROM flow WHERE kind='out' AND supplier=1").fetchall()
     recs = c.execute("SELECT amount,purpose FROM flow WHERE kind='receipt'").fetchall()
     meta = dict(c.execute("SELECT k,v FROM meta").fetchall()); c.close()
@@ -463,8 +466,8 @@ def bdds_data():
     for obj, budget, canon in sm:
         smeta_budget[obj][canon] += budget or 0; smeta_objs.add(obj)
     nk_by_num = {}
-    for num, obj, notes, title, total in nk:
-        canon = _canon_article((notes or "") + " " + (title or ""))
+    for num, obj, notes, title, total, article in nk:
+        canon = _canon_article(article or (notes or "") + " " + (title or ""))   # приоритет — статья от ИИ
         nk_by_num[str(num)] = {"object": obj or _object_from(title or "") or "—", "canon": canon, "total": total or 0}
     contr, opl = defaultdict(float), defaultdict(float)       # (object,canon) →
     obj_paid, obj_done, obj_contr, obj_unalloc = (defaultdict(float) for _ in range(4))
@@ -503,13 +506,16 @@ def store_nakopitel(num, bin_, terms, title=""):
     t = terms or {}
     acc = t.get("account") or _account_from(t.get("notes", ""))
     c = _db()
-    c.execute("INSERT OR REPLACE INTO nakopitel VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+    c.execute("""INSERT OR REPLACE INTO nakopitel
+        (num,bin,contract_no,contract_date,total,avans_sum,retention_pct,retention_sum,
+         barter,barter_sum,object,ochered,account,notes,title,read_ts,article)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
         str(num), str(bin_ or ""), t.get("contract_no", ""), t.get("contract_date", ""),
         float(t.get("total") or 0), float(t.get("avans_sum") or 0),
         float(t.get("retention_pct") or 0), float(t.get("retention_sum") or 0),
         1 if t.get("barter") else 0, float(t.get("barter_sum") or 0),
         t.get("object", ""), t.get("ochered", ""), acc, t.get("notes", ""), title,
-        datetime.now().strftime("%Y-%m-%d %H:%M")))
+        datetime.now().strftime("%Y-%m-%d %H:%M"), t.get("article", "")))
     c.commit(); c.close()
 
 
