@@ -55,8 +55,9 @@ def _load_config():
 
 def _req(url):
     r = urllib.request.Request(url)
-    if USER:
-        r.add_header("Authorization", "Basic " + base64.b64encode(f"{USER}:{PASS}".encode()).decode())
+    # Basic-заголовок шлём ВСЕГДА (даже с пустыми user:pass): часть баз требует заголовок,
+    # но впускает с пустым логином/паролем — а без заголовка отвечает 401.
+    r.add_header("Authorization", "Basic " + base64.b64encode(f"{USER}:{PASS}".encode()).decode())
     r.add_header("Accept", "application/json")
     with urllib.request.urlopen(r, timeout=120) as resp:
         return json.load(resp)
