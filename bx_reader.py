@@ -67,6 +67,56 @@ def file_fields(item):
     return out
 
 
+_FIELD_LABELS = None
+
+
+def field_labels():
+    """Код поля → человекочитаемое название (Договор поставщика / АВР / Счёт / Тех требование …). Кэш."""
+    global _FIELD_LABELS
+    if _FIELD_LABELS is None:
+        try:
+            res = _bx("crm.item.fields", {"entityTypeId": BX_ENTITY})
+            flds = res.get("fields", res) if isinstance(res, dict) else {}
+            _FIELD_LABELS = {code: (f.get("title") or code) for code, f in (flds or {}).items()}
+        except Exception:
+            _FIELD_LABELS = {}
+    return _FIELD_LABELS
+
+
+def item_documents(item):
+    """Прикреплённые документы заявки С ЯРЛЫКАМИ полей → [{field,label,name,url}].
+    Ярлык говорит, ЧТО это (Договор/АВР/Счёт/Тех требование/Доверенность), — не гадаем."""
+    labels = field_labels()
+    out = []
+    for field, url, name in file_fields(item):
+        out.append({"field": field, "label": labels.get(field, field), "name": name, "url": url})
+    return out
+
+
+# какое поле-документ под какую задачу (по подстроке в НАЗВАНИИ поля) — для точечного ИИ-чтения
+DOC_PURPOSE = {
+    "article":   ("тех требован", "тех. требован", "техтребован"),   # вид работ → статья
+    "contract":  ("договор",),                                        # условия (сумма/аванс/удержание)
+    "avr":       ("авр", "накладн", "выполнен", "кс-2", "кс-3"),       # выполнено
+    "invoice":   ("счёт", "счет"),                                     # сумма/№ счёта
+}
+
+
+def field_by_purpose(item, purpose):
+    """Файлы заявки под задачу (article/contract/avr/invoice) → [пути скачивания] или []."""
+    keys = DOC_PURPOSE.get(purpose, ())
+    labels = field_labels()
+    paths = []
+    for field, url, name in file_fields(item):
+        lbl = (labels.get(field, "") or "").lower()
+        if any(k in lbl for k in keys):
+            try:
+                paths.append(download(url))
+            except Exception:
+                pass
+    return paths
+
+
 def download(url):
     """Скачать вложение → путь. Тип по magic-bytes. Кэш по md5 (повторно не качаем)."""
     os.makedirs(CACHE, exist_ok=True)
