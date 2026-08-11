@@ -88,6 +88,10 @@ def _db():
         barter INT, barter_sum REAL, object TEXT, ochered TEXT, account TEXT,
         notes TEXT, title TEXT, read_ts TEXT)""")
     c.execute("CREATE TABLE IF NOT EXISTS adata_cache(bin TEXT PRIMARY KEY, short TEXT, json TEXT, ts TEXT)")
+    # смета объекта (для БДДС): статья × блок × бюджет × помесячный план (plan — JSON month→сумма)
+    c.execute("""CREATE TABLE IF NOT EXISTS smeta(
+        object TEXT, ochered TEXT, block TEXT, code TEXT, article TEXT,
+        budget REAL, plan TEXT, canon TEXT)""")
     # миграция: старая zayavka без company (создана прошлой версией)
     zcols = {r[1] for r in c.execute("PRAGMA table_info(zayavka)").fetchall()}
     if "company" not in zcols:
@@ -402,6 +406,46 @@ def store_reestr(payload):
     c.execute("INSERT INTO meta(k,v) VALUES('reestr_ts',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
               (payload.get("ts", ""),))
     c.commit(); n = len(rows); c.close()
+    return n
+
+
+def _canon_article(name):
+    """Свод статьи сметы к канону 13-справочника (для сравнения между объектами)."""
+    s = (name or "").lower()
+    pairs = [
+        (("монолит", "перекрыт", "балк", "фундамент", "сваи", "усиление стен"), "Монолит/фундамент"),
+        (("фасад", "наружн"), "Фасад"),
+        (("кровл",), "Кровля"),
+        (("окн", "витраж", "двер", "проем", "ворота"), "Окна/двери/проёмы"),
+        (("внутрен", "отделк"), "Внутренняя отделка"),
+        (("пол ", "полы"), "Полы"),
+        (("кладк", "перегород"), "Кладка/перегородки"),
+        (("лифт",), "Лифт"),
+        (("земл", "котлован"), "Земляные"),
+        (("отоплен", "вентил", "кондицион", "водопровод", "канализ", "газоснаб", "электро", "слаботоч", "пожар", "сети"), "Инж. сети"),
+        (("благоустр", "озелен", "маф", "подпорн"), "Благоустройство"),
+        (("аренд", "машин", "механизм", "гсм", "инструмент"), "Механизмы/накладные"),
+    ]
+    for keys, canon in pairs:
+        if any(k in s for k in keys):
+            return canon
+    return "Прочее"
+
+
+def store_smeta(payload):
+    """Принять смету объекта: заменить строки этого объекта. payload={object,ochered,months,articles:[…]}."""
+    obj = payload.get("object", "")
+    arts = [a for a in payload.get("articles", []) if "." in str(a.get("code", ""))]  # только статьи, не разделы
+    c = _db()
+    c.execute("DELETE FROM smeta WHERE object=?", (obj,))
+    c.executemany("INSERT INTO smeta VALUES(?,?,?,?,?,?,?,?)", [
+        (obj, str(payload.get("ochered", "")), str(a.get("block", "")), str(a.get("code", "")),
+         a.get("article", ""), float(a.get("budget") or 0),
+         json.dumps(a.get("plan", {}), ensure_ascii=False), _canon_article(a.get("article", "")))
+        for a in arts])
+    c.execute("INSERT INTO meta(k,v) VALUES('smeta_ts',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+              (datetime.now().strftime("%Y-%m-%d %H:%M"),))
+    c.commit(); n = len(arts); c.close()
     return n
 
 
@@ -1263,14 +1307,14 @@ class H(http.server.BaseHTTPRequestHandler):
             else:
                 self._send(login_page("Неверный логин или пароль"), code=401)
             return
-        if self.path not in ("/api/ingest", "/api/reestr"):
+        if self.path not in ("/api/ingest", "/api/reestr", "/api/smeta"):
             self._send("404", code=404); return
         if self.headers.get("X-Service-Key") != KEY:
             self._send('{"error":"bad key"}', "application/json", 401); return
         try:
             n = int(self.headers.get("Content-Length", 0))
             payload = json.loads(self.rfile.read(n).decode("utf-8"))
-            saved = store_reestr(payload) if self.path == "/api/reestr" else store(payload)
+            saved = ({"/api/reestr": store_reestr, "/api/smeta": store_smeta}.get(self.path) or store)(payload)
             self._send(json.dumps({"ok": True, "saved": saved}), "application/json")
         except Exception as e:
             self._send(json.dumps({"error": str(e)}), "application/json", 500)
