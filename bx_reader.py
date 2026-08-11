@@ -117,6 +117,43 @@ def field_by_purpose(item, purpose):
     return paths
 
 
+def read_purpose(item, purpose, instruction, schema):
+    """Прочитать документ(ы) заявки ПОД ЗАДАЧУ (article/avr/contract/invoice) → dict, {} если файла нет."""
+    paths = field_by_purpose(item, purpose)
+    if not paths:
+        return {}
+    return read_docs(paths, instruction, schema)
+
+
+# --- лёгкая схема: статья из Тех.требования (дёшево, для всех заявок) ---
+ARTICLE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {"article": _S, "object": _S, "ochered": _S, "work_desc": _S},
+    "required": ["article", "object", "ochered", "work_desc"],
+    "additionalProperties": False,
+}
+ARTICLE_INSTRUCTION = (
+    "Перед тобой ТЕХНИЧЕСКОЕ ТРЕБОВАНИЕ / договор по заявке стройхолдинга (Казахстан). Определи: "
+    "article = вид работ/поставки короткой фразой как в смете (Монолитные работы/Фундамент/Земляные/Кровля/"
+    "Фасад/Внутренняя отделка/Окна и двери/Кладка стен/Инженерные сети/Лифт/Поставка материалов/Аренда техники/"
+    "Проектные работы); object = ЖК (Атмосфера/Аура/Керуен/Аксай/…); ochered = очередь/блок; "
+    "work_desc = что именно делают/поставляют, одной строкой.")
+
+# --- АВР → выполнено (принятые работы, per заявка) ---
+AVR_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {"vypolneno_sum": _N, "act_no": _S, "act_date": _S,
+                   "all_signed": {"type": "boolean"}, "notes": _S},
+    "required": ["vypolneno_sum", "act_no", "act_date", "all_signed", "notes"],
+    "additionalProperties": False,
+}
+AVR_INSTRUCTION = (
+    "Перед тобой АКТ ВЫПОЛНЕННЫХ РАБОТ (АВР / КС-2 / КС-3) или накладная. Извлеки: "
+    "vypolneno_sum = сумма ПРИНЯТЫХ работ/поставки ИМЕННО по этому акту (число, без НДС-путаницы бери итог акта); "
+    "act_no/act_date = № и дата акта; all_signed = подписан ли ВСЕМИ сторонами (заказчик+подрядчик, "
+    "есть подписи и печати) true/false; notes — что принято, одной строкой.")
+
+
 def download(url):
     """Скачать вложение → путь. Тип по magic-bytes. Кэш по md5 (повторно не качаем)."""
     os.makedirs(CACHE, exist_ok=True)

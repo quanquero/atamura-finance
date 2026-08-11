@@ -99,6 +99,8 @@ def _db():
     nkcols = {r[1] for r in c.execute("PRAGMA table_info(nakopitel)").fetchall()}
     if "article" not in nkcols:                    # вид работ (статья) — ИИ извлекает из договора
         c.execute("ALTER TABLE nakopitel ADD COLUMN article TEXT")
+    if "vypolneno" not in nkcols:                  # выполнено по АВР (принятые работы, per заявка)
+        c.execute("ALTER TABLE nakopitel ADD COLUMN vypolneno REAL")
     return c
 
 
@@ -461,10 +463,9 @@ def bdds_data():
     + Выполнено (1С-поступления) на уровне объекта. Три ноги + бюджет там, где смета есть."""
     c = _db()
     sm = c.execute("SELECT object,budget,canon FROM smeta").fetchall()
-    nk = c.execute("SELECT num,object,notes,title,total,article FROM nakopitel").fetchall()
+    nk = c.execute("SELECT num,object,notes,title,total,article,vypolneno FROM nakopitel").fetchall()
     zs = c.execute("SELECT number,title FROM zayavka").fetchall()          # ВСЕ заявки Bitrix — мост к объекту
     pays = c.execute("SELECT amount,purpose FROM flow WHERE kind='out' AND supplier=1").fetchall()
-    recs = c.execute("SELECT amount,purpose FROM flow WHERE kind='receipt'").fetchall()
     meta = dict(c.execute("SELECT k,v FROM meta").fetchall()); c.close()
     smeta_budget = defaultdict(lambda: defaultdict(float))    # object → canon → бюджет
     smeta_objs = set()
@@ -479,10 +480,11 @@ def bdds_data():
             z_canon[n] = _canon_article(title or "")
     # прочитанные договоры: точный объект/статья (ИИ) + сумма договора
     nk_by_num = {}
-    for num, obj, notes, title, total, article in nk:
+    for num, obj, notes, title, total, article, vyp in nk:
         n = str(num)
         canon = _canon_article(article) if article else (z_canon.get(n) or _canon_article((notes or "") + " " + (title or "")))
-        nk_by_num[n] = {"object": obj or z_obj.get(n) or _object_from(title or "") or "—", "canon": canon, "total": total or 0}
+        nk_by_num[n] = {"object": obj or z_obj.get(n) or _object_from(title or "") or "—",
+                        "canon": canon, "total": total or 0, "vyp": vyp or 0}
 
     def attr(purpose):
         n = _num_from(purpose)
@@ -491,14 +493,14 @@ def bdds_data():
             return info["object"] or "—", info["canon"]
         return (z_obj.get(n) or _object_from(purpose) or "—"), (z_canon.get(n) or _canon_article(purpose))
 
-    contr, opl = defaultdict(float), defaultdict(float)       # (object,canon) →
+    contr, opl, vyp_oc = defaultdict(float), defaultdict(float), defaultdict(float)   # (object,canon) →
     obj_paid, obj_done, obj_contr = (defaultdict(float) for _ in range(3))
     for info in nk_by_num.values():
-        contr[(info["object"], info["canon"])] += info["total"]; obj_contr[info["object"]] += info["total"]
+        key = (info["object"], info["canon"])
+        contr[key] += info["total"]; obj_contr[info["object"]] += info["total"]
+        vyp_oc[key] += info["vyp"]; obj_done[info["object"]] += info["vyp"]         # выполнено = АВР (точно)
     for amt, purpose in pays:
         o, cn = attr(purpose); obj_paid[o] += amt or 0; opl[(o, cn)] += amt or 0
-    for amt, purpose in recs:
-        o, _cn = attr(purpose); obj_done[o] += amt or 0
     objects = set(smeta_objs) | set(obj_paid) | {i["object"] for i in nk_by_num.values()}
     out = []
     for o in sorted(objects):
@@ -506,9 +508,11 @@ def bdds_data():
         arts = []
         for cn in canons:
             b = smeta_budget.get(o, {}).get(cn, 0.0); ct = contr.get((o, cn), 0.0); op = opl.get((o, cn), 0.0)
-            if not (b or ct or op):
+            vy = vyp_oc.get((o, cn), 0.0)
+            if not (b or ct or op or vy):
                 continue
-            arts.append({"article": cn, "budget": b, "contracted": ct, "oplacheno": op, "ostatok": (b or ct) - op})
+            arts.append({"article": cn, "budget": b, "contracted": ct, "oplacheno": op,
+                         "vypolneno": vy, "ostatok": (b or ct) - op})
         out.append({"object": ("(объект не распознан)" if o == "—" else o), "has_smeta": o in smeta_objs,
                     "budget": sum(smeta_budget.get(o, {}).values()),
                     "contracted": obj_contr.get(o, 0.0), "oplacheno": obj_paid.get(o, 0.0),
@@ -548,14 +552,14 @@ def store_nakopitel(num, bin_, terms, title=""):
     c = _db()
     c.execute("""INSERT OR REPLACE INTO nakopitel
         (num,bin,contract_no,contract_date,total,avans_sum,retention_pct,retention_sum,
-         barter,barter_sum,object,ochered,account,notes,title,read_ts,article)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+         barter,barter_sum,object,ochered,account,notes,title,read_ts,article,vypolneno)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
         str(num), str(bin_ or ""), t.get("contract_no", ""), t.get("contract_date", ""),
         float(t.get("total") or 0), float(t.get("avans_sum") or 0),
         float(t.get("retention_pct") or 0), float(t.get("retention_sum") or 0),
         1 if t.get("barter") else 0, float(t.get("barter_sum") or 0),
         t.get("object", ""), t.get("ochered", ""), acc, t.get("notes", ""), title,
-        datetime.now().strftime("%Y-%m-%d %H:%M"), t.get("article", "")))
+        datetime.now().strftime("%Y-%m-%d %H:%M"), t.get("article", ""), float(t.get("vypolneno") or 0)))
     c.commit(); c.close()
 
 
@@ -614,6 +618,52 @@ def _nk_pipeline(num, bin_override="", progress=None):
 def read_nakopitel(num, bin_override=""):
     """Синхронно (для CLI): прочитать договор заявки и сохранить в накопитель."""
     return _nk_pipeline(num, bin_override)
+
+
+def read_zayavka_docs(num, read_contract=True, progress=None):
+    """Field-aware чтение заявки по НАЗНАЧЕНИЮ полей: договор→условия(+статья), иначе тех.требование→статья;
+    АВР→выполнено. Кладёт в накопитель. Дёшево при read_contract=False (только тех.требование + АВР)."""
+    def P(st, m):
+        if progress:
+            progress(st, m)
+    import bx_reader as R, nakopitel as NK
+    P("bitrix", "Открываю заявку в Bitrix…")
+    item = R.item_by_num(num)
+    if not item:
+        return {"error": "заявка не найдена в Bitrix", "num": str(num)}
+    title = item.get("title", "")
+    terms = {}
+    if read_contract:
+        P("read", "ИИ читает договор (условия)…")
+        t = R.read_purpose(item, "contract", R.NAKOPITEL_INSTRUCTION, R.NAKOPITEL_SCHEMA) or {}
+        if t and not t.get("error"):
+            terms = t
+    if not terms.get("article"):
+        P("read", "ИИ читает тех.требование (статья)…")
+        art = R.read_purpose(item, "article", R.ARTICLE_INSTRUCTION, R.ARTICLE_JSON_SCHEMA) or {}
+        if art and not art.get("error") and art.get("article"):
+            terms.setdefault("article", art.get("article", ""))
+            terms["object"] = terms.get("object") or art.get("object", "")
+            terms["ochered"] = terms.get("ochered") or art.get("ochered", "")
+            terms["notes"] = terms.get("notes") or art.get("work_desc", "")
+    P("read", "ИИ читает АВР (выполнено)…")
+    avr = R.read_purpose(item, "avr", R.AVR_INSTRUCTION, R.AVR_JSON_SCHEMA) or {}
+    if avr and not avr.get("error"):
+        terms["vypolneno"] = float(avr.get("vypolneno_sum") or 0)
+    if not terms:
+        return {"num": str(num), "error": "нет документов (договор/тех.требование/АВР) для чтения"}
+    binf = terms.get("bin") or NK._find_bin(item, title)
+    P("save", "Сохраняю в накопитель…")
+    store_nakopitel(num, binf, terms, title)
+    b = binf
+    if b and not (terms or {}).get("bin_no_adata"):
+        try:
+            import adata as A
+            store_adata(b, A.fetch(b))
+        except Exception:
+            pass
+    return {"ok": True, "num": str(num), "article": terms.get("article", ""),
+            "total": terms.get("total", 0), "vypolneno": terms.get("vypolneno", 0), "bin": b}
 
 
 # ---------- фоновые задачи чтения (прогресс для UI) ----------
@@ -1220,7 +1270,7 @@ function rBdds(v){
         body+='<tr class="bdart a'+oi+'" style="display:none">'
           +'<td style="padding-left:34px;color:#475569">'+esc(a.article)+'</td>'
           +'<td class=num>'+(a.budget?money(a.budget):'—')+'</td><td class=num>'+money(a.contracted)+'</td>'
-          +'<td class=num style=color:#0e7490>'+money(a.oplacheno)+'</td><td class=num style=color:#cbd5e1>—</td>'
+          +'<td class=num style=color:#0e7490>'+money(a.oplacheno)+'</td><td class=num style=color:#7c3aed>'+(a.vypolneno?money(a.vypolneno):'—')+'</td>'
           +'<td class=num style=color:#b91c1c>'+money(a.ostatok)+'</td></tr>';
       });
     });
