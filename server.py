@@ -721,6 +721,67 @@ def _run_nk_job(jid, num, binv):
         _job(jid, "error", str(e)[:200], done=True)
 
 
+def queue_zayavki(limit=300):
+    """Оплаченные заявки (платёж матчится по № в назначении 1С), ещё НЕ прочитанные ИИ,
+    по убыванию суммы оплаты — очередь на обработку документов."""
+    c = _db()
+    z = {}
+    for num, title in c.execute("SELECT number,title FROM zayavka").fetchall():
+        n = str(num or "").strip() or _num_from(title or "")
+        if n:
+            z[n] = title or ""
+    paid = defaultdict(float)
+    for amt, purpose in c.execute("SELECT amount,purpose FROM flow WHERE kind='out' AND supplier=1").fetchall():
+        n = _num_from(purpose)
+        if n and n in z:
+            paid[n] += amt or 0
+    read = {str(r[0]) for r in c.execute(
+        "SELECT num FROM nakopitel WHERE article!='' OR total>0 OR vypolneno>0").fetchall()}
+    c.close()
+    rows = [{"num": n, "paid": p, "object": _object_from(z.get(n, "")) or "—",
+             "title": (z.get(n, "") or "")[:90]}
+            for n, p in paid.items() if n not in read]
+    rows.sort(key=lambda x: -x["paid"])
+    return rows[:limit] if limit else rows
+
+
+def queue_stats():
+    """Сводка очереди обработки: сколько оплаченных заявок ждёт чтения, на какую сумму, сколько прочитано."""
+    allr = queue_zayavki(limit=None)
+    c = _db()
+    read = c.execute("SELECT COUNT(*) FROM nakopitel WHERE article!='' OR total>0 OR vypolneno>0").fetchone()[0]
+    c.close()
+    return {"pending": len(allr), "pending_sum": sum(r["paid"] for r in allr),
+            "read": read, "top": allr[:200]}
+
+
+def _run_process_job(jid, n):
+    """Фоновая обработка: читает документы top-n непрочитанных оплаченных заявок (по сумме)."""
+    try:
+        rows = queue_zayavki(limit=n)
+        total = len(rows)
+        if not total:
+            _job(jid, "done", "Очередь пуста — всё прочитано", done=True, result={"total": 0, "done": []})
+            return
+        done = []
+        for i, r in enumerate(rows, 1):
+            _job(jid, "read", f"[{i}/{total}] №{r['num']} · {r['object']} · оплачено {money(r['paid'])} ₸",
+                 result={"i": i, "total": total, "done": done})
+            try:
+                res = read_zayavka_docs(r["num"], read_contract=True)
+            except Exception as e:
+                res = {"error": str(e)[:200]}
+            done.append({"num": r["num"], "object": r["object"], "paid": r["paid"],
+                         "ok": bool(res.get("ok")), "article": res.get("article", ""),
+                         "total": res.get("total", 0), "vypolneno": res.get("vypolneno", 0),
+                         "doc_kinds": res.get("doc_kinds", ""), "error": res.get("error", "")})
+        okn = sum(1 for d in done if d["ok"])
+        _job(jid, "done", f"Готово: прочитано {okn} из {total}", done=True,
+             result={"i": total, "total": total, "done": done})
+    except Exception as e:
+        _job(jid, "error", str(e)[:200], done=True)
+
+
 def money(n):
     return f"{n:,.0f}".replace(",", " ")
 
@@ -858,7 +919,7 @@ function money(n){return (Math.round(n||0)).toLocaleString('ru-RU').replace(/,/g
 function el(t,c,h){var e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;}
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');}
 var D=null, tab='obzor';
-var TABS=[['obzor','Обзор'],['pay','Платежи 1С'],['sved','Сведение'],['nk','Накопитель'],['bdds','БДДС'],['ctrl','Контроль']];
+var TABS=[['obzor','Обзор'],['pay','Платежи 1С'],['sved','Сведение'],['nk','Накопитель'],['bdds','БДДС'],['proc','Обработка'],['ctrl','Контроль']];
 
 fetch('data.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){D=d;boot();})
   .catch(function(e){app.className='';app.innerHTML='<div class=wrap><div class=err>Ошибка загрузки данных: '+e+'</div></div>';});
@@ -884,7 +945,7 @@ function boot(){
     +'<span style="color:#64748b">· индекс '+esc(m.idx_ts||'—')+'</span>';
   app.appendChild(foot);
 }
-function render(){var v=document.getElementById('view');v.innerHTML='';({obzor:rObzor,pay:rPay,sved:rSved,nk:rNk,bdds:rBdds,ctrl:rCtrl}[tab])(v);}
+function render(){var v=document.getElementById('view');v.innerHTML='';({obzor:rObzor,pay:rPay,sved:rSved,nk:rNk,bdds:rBdds,proc:rProcess,ctrl:rCtrl}[tab])(v);}
 
 function card(inner){var c=el('div','card');if(typeof inner=='string')c.innerHTML=inner;else c.appendChild(inner);return c;}
 function h2(t){return el('h2',null,t);}
@@ -1323,6 +1384,65 @@ function rBdds(v){
   }).catch(function(e){host.innerHTML='<div class=err>Ошибка БДДС: '+e+'</div>';});
 }
 
+function rProcess(v){
+  v.appendChild(h2('Обработка заявок — чтение документов по клику'));
+  v.appendChild(el('div','note','Очередь = оплаченные заявки, ещё не прочитанные ИИ, по убыванию суммы. «Обработать» → ИИ читает вложения ПО СОДЕРЖИМОМУ (устойчиво к мисфайлингу), заполняет статью/сумму/выполнено/условия в накопитель и БДДС.'));
+  var host=el('div');host.innerHTML='<div class=note>Загрузка очереди…</div>';v.appendChild(host);
+  function renderRes(hostEl,done){
+    hostEl.innerHTML='<div class=card><div style="padding:8px 12px;font-size:12px;color:#64748b;background:#f8fafc">Результаты чтения ('+done.length+')</div>'
+      +'<div class=tblscroll><table><thead><tr><th>№</th><th>Объект</th><th class=num>Оплачено</th><th>Что прочитано</th><th>Статья</th><th class=num>Сумма</th><th class=num>Выполнено</th><th>Итог</th></tr></thead><tbody>'
+      +done.map(function(x){return '<tr>'
+        +'<td>'+esc(x.num)+'</td><td>'+esc(x.object)+'</td><td class=num>'+money(x.paid)+'</td>'
+        +'<td style="color:#64748b;font-size:11px">'+esc((x.doc_kinds||'').slice(0,40))+'</td>'
+        +'<td>'+esc((x.article||'').slice(0,30))+'</td>'
+        +'<td class=num>'+(x.total?money(x.total):'—')+'</td>'
+        +'<td class=num style=color:#7c3aed>'+(x.vypolneno?money(x.vypolneno):'—')+'</td>'
+        +'<td>'+(x.ok?'<span style=color:#0e7490>✓</span>':'<span style=color:#b91c1c>✕ '+esc((x.error||'').slice(0,28))+'</span>')+'</td>'
+        +'</tr>';}).join('')+'</tbody></table></div></div>';
+  }
+  function load(){
+    host.innerHTML='<div class=note>Загрузка очереди…</div>';
+    fetch('queue.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+      host.innerHTML='';
+      var strip=el('div','svet wide');
+      function tl(cls,val,lbl){return '<div class="sv '+cls+'"><div class=n style="font-size:20px">'+val+'</div><div class=l>'+lbl+'</div></div>';}
+      strip.innerHTML=tl('y',d.pending,'В очереди (не прочитано)')+tl('r',money(d.pending_sum)+' ₸','Сумма в очереди')+tl('g',d.read,'Прочитано ИИ');
+      host.appendChild(strip);
+      var pf=el('div');pf.style.cssText='display:flex;gap:8px;align-items:center;margin:14px 0;flex-wrap:wrap';
+      pf.innerHTML='<span style="color:#475569;font-size:13px">Обработать следующих:</span>'
+        +'<input class=pn type=number value=10 min=1 max=50 style="width:80px;padding:7px 10px;border:1px solid #cbd5e1;border-radius:8px">'
+        +'<button class=pgo style="padding:8px 16px;border:0;border-radius:8px;background:#0ea5e9;color:#fff;font-weight:600;cursor:pointer">Обработать →</button>'
+        +'<span class=pmsg style="color:#64748b;font-size:12px"></span>';
+      host.appendChild(pf);
+      var prog=el('div');prog.style.marginBottom='12px';host.appendChild(prog);
+      var resHost=el('div');host.appendChild(resHost);
+      var top=d.top||[];
+      var qc=el('div','card');
+      qc.innerHTML='<div style="padding:8px 12px;font-size:12px;color:#64748b;background:#f8fafc">Очередь (топ '+top.length+' по сумме оплаты)</div>'
+        +'<div class=tblscroll><table><thead><tr><th>№</th><th>Объект</th><th class=num>Оплачено</th><th>Заявка</th></tr></thead><tbody>'
+        +top.map(function(x){return '<tr><td>'+esc(x.num)+'</td><td>'+esc(x.object)+'</td><td class=num>'+money(x.paid)+'</td><td style="color:#64748b">'+esc((x.title||'').slice(0,60))+'</td></tr>';}).join('')+'</tbody></table></div>';
+      host.appendChild(qc);
+      var pn=pf.querySelector('.pn'),pgo=pf.querySelector('.pgo'),pmsg=pf.querySelector('.pmsg');
+      pgo.onclick=function(){
+        var n=Math.max(1,Math.min(50,parseInt(pn.value)||10));
+        pgo.disabled=true;pmsg.textContent='запускаю…';
+        fetch('process?n='+n,{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
+          if(j.error||!j.job){pgo.disabled=false;pmsg.textContent='ошибка: '+(j.error||'нет задачи');return;}
+          var poll=setInterval(function(){
+            fetch('nk-status?id='+encodeURIComponent(j.job),{cache:'no-store'}).then(function(r){return r.json();}).then(function(s){
+              var rr=s.result||{},i=rr.i||0,total=rr.total||n,pct=total?Math.round(i/total*100):0;
+              prog.innerHTML='<div style="font-size:13px;color:#334155;margin-bottom:4px">'+esc(s.msg||'')+'</div>'
+                +'<div class=track style="height:12px"><div class="fill fi" style="width:'+pct+'%;background:#0ea5e9"></div></div>';
+              var done=rr.done||[];if(done.length)renderRes(resHost,done);
+              if(s.done){clearInterval(poll);pgo.disabled=false;pmsg.textContent=s.msg||'готово';setTimeout(load,1000);}
+            }).catch(function(e){clearInterval(poll);pgo.disabled=false;pmsg.textContent='ошибка опроса';});
+          },1200);
+        }).catch(function(e){pgo.disabled=false;pmsg.textContent='ошибка запуска';});
+      };
+    }).catch(function(e){host.innerHTML='<div class=err>Ошибка очереди: '+e+'</div>';});
+  }
+  load();
+}
 function rCtrl(v){
   var g={};D.payments.forEach(function(p){if(!p.bin)return;var k=p.company+'|'+p.bin+'|'+Math.round(p.amount)+'|'+p.date;(g[k]=g[k]||[]).push(p);});
   var dub=Object.keys(g).map(function(k){return g[k];}).filter(function(a){return a.length>1;}).map(function(a){return {company:a[0].company,name:a[0].name,bin:a[0].bin,amount:a[0].amount,date:a[0].date,n:a.length};});
@@ -1521,6 +1641,17 @@ class H(http.server.BaseHTTPRequestHandler):
                     self._send('{"error":"нет № заявки"}', "application/json", 400)
                 else:
                     self._send(json.dumps(zayavka_card(num), ensure_ascii=False), "application/json")
+            except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
+        elif self.path == "/queue.json":
+            try: self._send(json.dumps(queue_stats(), ensure_ascii=False), "application/json")
+            except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
+        elif self.path.startswith("/process"):
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                n = max(1, min(50, int((q.get("n", ["10"])[0]) or 10)))
+                jid = _new_job()
+                threading.Thread(target=_run_process_job, args=(jid, n), daemon=True).start()
+                self._send(json.dumps({"job": jid}), "application/json")
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path.startswith("/nk-read"):
             try:
