@@ -283,12 +283,13 @@ def read_docs(paths, instruction, schema_hint=None):
     content, ok = _build_content(paths, instruction)
     if not ok:
         return {"error": "нет читаемых вложений"}
+    schema = schema_hint or NAKOPITEL_JSON_SCHEMA      # ← уважаем схему задачи (АВР/счёт/статья), не форсим накопитель
     model = os.environ.get("CLAUDE_MODEL", "claude-opus-5")
     try:
         client = anthropic.Anthropic()
         resp = client.messages.create(
             model=model, max_tokens=8000,
-            output_config={"format": {"type": "json_schema", "schema": NAKOPITEL_JSON_SCHEMA},
+            output_config={"format": {"type": "json_schema", "schema": schema},
                            "effort": "medium"},
             messages=[{"role": "user", "content": content}],
         )
