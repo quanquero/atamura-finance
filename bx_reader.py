@@ -83,6 +83,32 @@ def field_labels():
     return _FIELD_LABELS
 
 
+_OBJ_ENUM = None
+OBJECT_FIELD = "ufCrm4_1643707871"      # «Объект эксплуатации Стройка» — enum с точным объектом заявки
+
+
+def object_enum():
+    """id → название объекта из enum-поля «Объект эксплуатации Стройка». Кэш."""
+    global _OBJ_ENUM
+    if _OBJ_ENUM is None:
+        try:
+            res = _bx("crm.item.fields", {"entityTypeId": BX_ENTITY})
+            flds = res.get("fields", res) if isinstance(res, dict) else {}
+            items = (flds.get(OBJECT_FIELD, {}) or {}).get("items") or []
+            _OBJ_ENUM = {str(it.get("ID")): (it.get("VALUE") or "") for it in items}
+        except Exception:
+            _OBJ_ENUM = {}
+    return _OBJ_ENUM
+
+
+def item_object(item):
+    """Название объекта заявки из enum-поля (точнее, чем парсинг названия). '' если нет."""
+    v = (item or {}).get(OBJECT_FIELD)
+    if v in (None, "", 0, "0"):
+        return ""
+    return object_enum().get(str(v), "")
+
+
 def item_documents(item):
     """Прикреплённые документы заявки С ЯРЛЫКАМИ полей → [{field,label,name,url}].
     Ярлык говорит, ЧТО это (Договор/АВР/Счёт/Тех требование/Доверенность), — не гадаем."""

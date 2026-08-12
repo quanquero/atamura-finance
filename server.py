@@ -77,7 +77,8 @@ def _db():
         amount REAL, vidop TEXT, supplier INT, purpose TEXT, comment TEXT, dogovor_key TEXT)""")
     c.execute("CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)")
     c.execute("""CREATE TABLE IF NOT EXISTS zayavka(
-        id INTEGER, number TEXT, title TEXT, supplier TEXT, amount REAL, stage TEXT, company TEXT)""")
+        id INTEGER, number TEXT, title TEXT, supplier TEXT, amount REAL, stage TEXT,
+        company TEXT, bx_object TEXT)""")
     c.execute("""CREATE TABLE IF NOT EXISTS reestr(
         src TEXT, num TEXT, name TEXT, bin TEXT, iban TEXT, amount REAL, purpose TEXT, invoice TEXT)""")
     c.execute("CREATE TABLE IF NOT EXISTS zayavka_idx(num TEXT PRIMARY KEY, id INTEGER)")
@@ -96,6 +97,8 @@ def _db():
     zcols = {r[1] for r in c.execute("PRAGMA table_info(zayavka)").fetchall()}
     if "company" not in zcols:
         c.execute("ALTER TABLE zayavka ADD COLUMN company TEXT")
+    if "bx_object" not in zcols:
+        c.execute("ALTER TABLE zayavka ADD COLUMN bx_object TEXT")
     nkcols = {r[1] for r in c.execute("PRAGMA table_info(nakopitel)").fetchall()}
     if "article" not in nkcols:                    # вид работ (статья) — ИИ извлекает из договора
         c.execute("ALTER TABLE nakopitel ADD COLUMN article TEXT")
@@ -148,11 +151,15 @@ def sync_bitrix(full=True):
         return {"error": "BITRIX_WEBHOOK не задан"}
     since = (datetime.now() - timedelta(days=30 * BX_MONTHS)).strftime("%Y-%m-%dT00:00:00")
     cap = 40000 if full else 6000
+    import bx_reader as R
+    obj_field = R.OBJECT_FIELD
+    enum = R.object_enum()                                   # id → название объекта (enum «Объект эксплуатации»)
     rows, start = [], 0
     while True:
         params = {
             "entityTypeId": BX_ENTITY, "start": start, "order[id]": "desc",
-            "select[]": ["id", "title", "opportunity", "stageId", "ufCrm4_1644310716", "ufCrm4_1762251054209"],
+            "select[]": ["id", "title", "opportunity", "stageId", "ufCrm4_1644310716",
+                         "ufCrm4_1762251054209", obj_field],
         }
         if not full:
             params["filter[>=createdTime]"] = since
@@ -165,12 +172,14 @@ def sync_bitrix(full=True):
     c = _db()
     c.execute("DROP TABLE IF EXISTS zayavka")
     c.execute("""CREATE TABLE zayavka(
-        id INTEGER, number TEXT, title TEXT, supplier TEXT, amount REAL, stage TEXT, company TEXT)""")
-    c.executemany("INSERT INTO zayavka VALUES(?,?,?,?,?,?,?)", [(
+        id INTEGER, number TEXT, title TEXT, supplier TEXT, amount REAL, stage TEXT,
+        company TEXT, bx_object TEXT)""")
+    c.executemany("INSERT INTO zayavka VALUES(?,?,?,?,?,?,?,?)", [(
         it.get("id"),
         str(it.get("ufCrm4_1644310716") or "").strip() or _num_from(it.get("title")),
         it.get("title", ""), str(it.get("ufCrm4_1762251054209") or ""),
         float(it.get("opportunity") or 0), it.get("stageId", ""), _company_from(it.get("title")),
+        enum.get(str(it.get(obj_field)), "") if it.get(obj_field) not in (None, "", 0, "0") else "",
     ) for it in rows])
     c.execute("INSERT INTO meta(k,v) VALUES('bx_sync',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
               (datetime.now().strftime("%Y-%m-%d %H:%M"),))
@@ -469,7 +478,7 @@ def bdds_data():
     c = _db()
     sm = c.execute("SELECT object,budget,canon FROM smeta").fetchall()
     nk = c.execute("SELECT num,object,notes,title,total,article,vypolneno FROM nakopitel").fetchall()
-    zs = c.execute("SELECT number,title FROM zayavka").fetchall()          # ВСЕ заявки Bitrix — мост к объекту
+    zs = c.execute("SELECT number,title,bx_object FROM zayavka").fetchall()   # ВСЕ заявки Bitrix — мост к объекту (bx_object = enum, точный)
     pays = c.execute("SELECT amount,purpose FROM flow WHERE kind='out' AND supplier=1").fetchall()
     meta = dict(c.execute("SELECT k,v FROM meta").fetchall()); c.close()
     smeta_budget = defaultdict(lambda: defaultdict(float))    # object → canon → бюджет
@@ -479,10 +488,11 @@ def bdds_data():
         smeta_budget[o][canon] += budget or 0; smeta_objs.add(o)
     # № заявки → (объект, статья-канон) из названия «№ / компания / поставщик / ОБЪЕКТ / РАБОТА / …» — покрывает ВСЕ заявки
     z_obj, z_canon = {}, {}
-    for number, title in zs:
+    for number, title, bxo in zs:
         n = str(number or "").strip() or _num_from(title or "")
         if n:
-            z_obj[n] = _object_from(title or "") or ""
+            # приоритет — точный enum-объект заявки; канон через _object_from, иначе сырое имя из enum
+            z_obj[n] = _object_from(bxo or "") or _object_from(title or "") or (bxo or "").strip() or ""
             z_canon[n] = _canon_article(title or "")
     # прочитанные договоры: точный объект/статья (ИИ) + сумма договора
     nk_by_num = {}
