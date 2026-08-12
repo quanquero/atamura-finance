@@ -470,7 +470,8 @@ def bdds_data():
     smeta_budget = defaultdict(lambda: defaultdict(float))    # object → canon → бюджет
     smeta_objs = set()
     for obj, budget, canon in sm:
-        smeta_budget[obj][canon] += budget or 0; smeta_objs.add(obj)
+        o = _object_from(obj) or obj                          # канон объекта («Аура» и т.п.)
+        smeta_budget[o][canon] += budget or 0; smeta_objs.add(o)
     # № заявки → (объект, статья-канон) из названия «№ / компания / поставщик / ОБЪЕКТ / РАБОТА / …» — покрывает ВСЕ заявки
     z_obj, z_canon = {}, {}
     for number, title in zs:
@@ -483,7 +484,7 @@ def bdds_data():
     for num, obj, notes, title, total, article, vyp in nk:
         n = str(num)
         canon = _canon_article(article) if article else (z_canon.get(n) or _canon_article((notes or "") + " " + (title or "")))
-        nk_by_num[n] = {"object": obj or z_obj.get(n) or _object_from(title or "") or "—",
+        nk_by_num[n] = {"object": _object_from(obj) or z_obj.get(n) or _object_from(title or "") or _object_from(obj or "") or "—",
                         "canon": canon, "total": total or 0, "vyp": vyp or 0}
 
     def attr(purpose):
@@ -1264,9 +1265,34 @@ function openZayavka(num){
   }).catch(function(e){var b=document.getElementById('zkbody');if(b)b.innerHTML='<div class=err style="padding:16px">ошибка: '+e+'</div>';});
 }
 
+function openObjectBdds(o){
+  var arts=(o.articles||[]).slice();
+  var basis=arts.some(function(a){return a.oplacheno>0;})?'oplacheno':(arts.some(function(a){return a.budget>0;})?'budget':'contracted');
+  var basisLbl=basis==='oplacheno'?'оплачено 1С':(basis==='budget'?'бюджет сметы':'договоры');
+  var pairs=arts.map(function(a){return [a.article,a[basis]||0];}).filter(function(p){return p[1]>0;}).sort(function(a,b){return b[1]-a[1];});
+  var pal=['#0e7490','#c2410c','#7c3aed','#0891b2','#b45309','#4d7c0f','#be123c','#0369a1','#a21caf','#15803d'];
+  var top=pairs.slice(0,9),restv=pairs.slice(9).reduce(function(s,x){return s+x[1];},0);if(restv>0)top.push(['прочее',restv]);
+  var col={};top.forEach(function(x,i){col[x[0]]=pal[i%pal.length];});col['прочее']='#94a3b8';
+  var rest=(o.budget||o.contracted)-o.oplacheno;
+  function tile(l,vv,cls){return '<div class="nktile '+(cls||'')+'"><div class=l>'+l+'</div><div class=vv>'+vv+'</div></div>';}
+  var h='<div class=nkhd><div class=t>'+esc(o.object)+(o.has_smeta?' <span class="pill ok" style="font-weight:600">смета</span>':'')+'</div>'
+    +'<div class=s>Разбор объекта: из чего состоит и что законтрактовано / оплачено / выполнено</div></div>'
+    +'<div class=nkstrip>'+tile('Бюджет (смета)',money(o.budget)+' ₸')+tile('Договоры',money(o.contracted)+' ₸')
+    +tile('Оплачено 1С',money(o.oplacheno)+' ₸','f')+tile('Выполнено (АВР)',money(o.vypolneno)+' ₸')
+    +tile('Остаток',money(rest)+' ₸','r')+'</div>';
+  h+='<h4>Из чего состоит объект · '+basisLbl+'</h4>';
+  if(top.length){h+='<div style="display:flex;gap:22px;align-items:center;flex-wrap:wrap;margin:6px 0 4px">'
+    +donutSVG(top,col)+'<div style="flex:1;min-width:260px">'+legend(top,col)+'</div></div>';}
+  else h+='<div class=note>Пока нет разложения по статьям — прочитай договоры/тех.требования по заявкам этого объекта.</div>';
+  arts.sort(function(a,b){return (b.oplacheno||b.budget||0)-(a.oplacheno||a.budget||0);});
+  h+='<h4>Статьи</h4><div class=tblscroll style="max-height:34vh"><table><thead><tr><th>Статья</th><th class=num>Бюджет</th><th class=num>Договоры</th><th class=num>Оплачено</th><th class=num>Выполнено</th><th class=num>Остаток</th></tr></thead><tbody>'
+    +arts.map(function(a){return '<tr><td>'+esc(a.article)+'</td><td class=num>'+(a.budget?money(a.budget):'—')+'</td><td class=num>'+money(a.contracted)+'</td><td class=num style=color:#0e7490>'+money(a.oplacheno)+'</td><td class=num style=color:#7c3aed>'+(a.vypolneno?money(a.vypolneno):'—')+'</td><td class=num style=color:#b91c1c>'+money(a.ostatok)+'</td></tr>';}).join('')
+    +'</tbody></table></div>';
+  openModal(h);
+}
 function rBdds(v){
   v.appendChild(h2('БДДС по объектам'));
-  v.appendChild(el('div','note','Три ноги: Договоры (план) · Выполнено (АВР из 1С-поступлений) · Оплачено (1С). Где есть смета — колонка Бюджет. Клик по объекту раскрывает статьи.'));
+  v.appendChild(el('div','note','Три ноги: Договоры (план) · Выполнено (АВР из 1С-поступлений) · Оплачено (1С). Где есть смета — колонка Бюджет. Клик по объекту открывает окно-разбор с визуалом «из чего состоит».'));
   var pf=el('div');pf.style.cssText='display:flex;gap:6px;align-items:center;margin-bottom:10px';
   pf.innerHTML='<span style="color:#94a3b8;font-size:13px">Провалиться в заявку:</span><input class=zkin placeholder="№ заявки" style="padding:6px 10px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;border-radius:8px;width:150px"><button class=zkgo style="padding:6px 12px;border:0;border-radius:8px;background:#0ea5e9;color:#fff;cursor:pointer;font-weight:600">Открыть</button>';
   v.appendChild(pf);
@@ -1285,30 +1311,19 @@ function rBdds(v){
     host.appendChild(strip);
     var wrap=el('div','tblscroll');wrap.style.marginTop='12px';var t=el('table');
     var body='';
+    objs.sort(function(a,b){return (b.oplacheno||b.budget||0)-(a.oplacheno||a.budget||0);});
     objs.forEach(function(o,oi){
       var rest=(o.budget||o.contracted)-o.oplacheno;
-      body+='<tr class=bdobj data-i="'+oi+'" style="cursor:pointer;background:#f8fafc;font-weight:700">'
-        +'<td>▸ '+esc(o.object)+(o.has_smeta?' <span class="pill ok" style="font-weight:600">смета</span>':'')+'</td>'
+      body+='<tr class=bdobj data-i="'+oi+'" style="cursor:pointer;font-weight:700">'
+        +'<td>'+esc(o.object)+(o.has_smeta?' <span class="pill ok" style="font-weight:600">смета</span>':'')+' <span style="color:#0ea5e9;font-weight:600;font-size:12px">изучить →</span></td>'
         +'<td class=num>'+(o.budget?money(o.budget):'—')+'</td><td class=num>'+money(o.contracted)+'</td>'
         +'<td class=num style=color:#0e7490>'+money(o.oplacheno)+'</td><td class=num style=color:#7c3aed>'+money(o.vypolneno)+'</td>'
         +'<td class=num style=color:#b91c1c><b>'+money(rest)+'</b></td></tr>';
-      o.articles.forEach(function(a){
-        body+='<tr class="bdart a'+oi+'" style="display:none">'
-          +'<td style="padding-left:34px;color:#475569">'+esc(a.article)+'</td>'
-          +'<td class=num>'+(a.budget?money(a.budget):'—')+'</td><td class=num>'+money(a.contracted)+'</td>'
-          +'<td class=num style=color:#0e7490>'+money(a.oplacheno)+'</td><td class=num style=color:#7c3aed>'+(a.vypolneno?money(a.vypolneno):'—')+'</td>'
-          +'<td class=num style=color:#b91c1c>'+money(a.ostatok)+'</td></tr>';
-      });
     });
-    t.innerHTML='<thead><tr><th>Объект / статья</th><th class=num>Бюджет</th><th class=num>Договоры</th><th class=num>Оплачено</th><th class=num>Выполнено</th><th class=num>Остаток</th></tr></thead><tbody>'+body+'</tbody>';
+    t.innerHTML='<thead><tr><th>Объект</th><th class=num>Бюджет</th><th class=num>Договоры</th><th class=num>Оплачено</th><th class=num>Выполнено</th><th class=num>Остаток</th></tr></thead><tbody>'+body+'</tbody>';
     wrap.appendChild(t);host.appendChild(wrap);
     t.querySelectorAll('tr.bdobj').forEach(function(tr){
-      tr.onclick=function(){
-        var i=tr.getAttribute('data-i'),open=tr.getAttribute('data-open')==='1';
-        tr.setAttribute('data-open',open?'0':'1');
-        var td=tr.querySelector('td');td.innerHTML=td.innerHTML.replace(open?'▾':'▸',open?'▸':'▾');
-        t.querySelectorAll('tr.a'+i).forEach(function(x){x.style.display=open?'none':'';});
-      };
+      tr.onclick=function(){openObjectBdds(objs[+tr.getAttribute('data-i')]);};
     });
     host.appendChild(el('div','note','Оплачено/статья — все платежи 1С, разложенные по объекту и виду работ через ЗАЯВКУ Bitrix (в названии заявки есть объект и работа). Договоры — из прочитанных договоров (пока мало). Бюджет — из сметы (пока Аура). Выполнено — 1С-поступления (АВР). Статьи уточняются по мере чтения договоров (ИИ).'));
   }).catch(function(e){host.innerHTML='<div class=err>Ошибка БДДС: '+e+'</div>';});
