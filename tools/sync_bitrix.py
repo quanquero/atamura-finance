@@ -3,7 +3,8 @@
 Вызывает функции server.py напрямую в том же процессе; BITRIX_WEBHOOK берётся из .env
 (server._load_env_file подтягивает при импорте). Запускается systemd-таймером на finance-сервере.
 
-    python3 tools/sync_bitrix.py            # окно заявок (воронка 178 за BX_MONTHS) — часто (каждые N ч)
+    python3 tools/sync_bitrix.py            # ВСЕ заявки 178 с названиями → zayavka (для БДДС/матчинга)
+    python3 tools/sync_bitrix.py --window   # только окно BX_MONTHS (быстро, если нужно)
     python3 tools/sync_bitrix.py --full     # + индекс № → id ИНКРЕМЕНТНО (только новые) — раз в сутки
     python3 tools/sync_bitrix.py --rebuild  # разовый полный пересбор индекса с нуля
 """
@@ -17,11 +18,13 @@ import server as S
 def main():
     rebuild = "--rebuild" in sys.argv
     full = rebuild or "--full" in sys.argv
+    window = "--window" in sys.argv
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] sync_bitrix (окно {S.BX_MONTHS} мес): {S.sync_bitrix()}")
+    tag = f"окно {S.BX_MONTHS} мес" if window else "ВСЕ заявки"
+    print(f"[{ts}] sync_bitrix ({tag}): {S.sync_bitrix(full=not window)}")
     if full:
-        tag = "полный пересбор" if rebuild else "инкремент"
-        print(f"[{ts}] sync_bitrix_full ({tag}): {S.sync_bitrix_full(rebuild=rebuild)}")
+        t2 = "полный пересбор" if rebuild else "инкремент"
+        print(f"[{ts}] sync_bitrix_full ({t2}): {S.sync_bitrix_full(rebuild=rebuild)}")
 
 
 if __name__ == "__main__":

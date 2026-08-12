@@ -140,21 +140,26 @@ def _bx(method, params):
         return json.load(r)
 
 
-def sync_bitrix():
-    """Тянем Служебные записки (воронка оплат 178) за BX_MONTHS мес → таблица zayavka."""
+def sync_bitrix(full=True):
+    """Тянем Служебные записки (воронка оплат 178) → таблица zayavka (полные строки с названиями).
+    full=True (по умолч.) — ВСЕ заявки: нужно БДДС и матчингу платёж→объект (платёж может ссылаться на
+    старую заявку вне окна). full=False — только окно BX_MONTHS (быстро, если понадобится)."""
     if not BITRIX:
         return {"error": "BITRIX_WEBHOOK не задан"}
     since = (datetime.now() - timedelta(days=30 * BX_MONTHS)).strftime("%Y-%m-%dT00:00:00")
+    cap = 40000 if full else 6000
     rows, start = [], 0
     while True:
-        d = _bx("crm.item.list", {
-            "entityTypeId": BX_ENTITY, "start": start,
-            "filter[>=createdTime]": since, "order[id]": "desc",
+        params = {
+            "entityTypeId": BX_ENTITY, "start": start, "order[id]": "desc",
             "select[]": ["id", "title", "opportunity", "stageId", "ufCrm4_1644310716", "ufCrm4_1762251054209"],
-        })
+        }
+        if not full:
+            params["filter[>=createdTime]"] = since
+        d = _bx("crm.item.list", params)
         items = d.get("result", {}).get("items", [])
         rows += items
-        if len(items) < 50 or len(rows) >= 6000:
+        if len(items) < 50 or len(rows) >= cap:
             break
         start += 50
     c = _db()
