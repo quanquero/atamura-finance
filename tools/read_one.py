@@ -59,18 +59,23 @@ def read_one(num, cheap=False):
     print("Название:", (item.get("title", "") or "")[:92])
     docs = R.item_documents(item)
     if docs:
-        print("\nВложения по слотам (ярлык поля Bitrix -> файл):")
+        print("\nВложения (ярлык поля -> файл -> ЧТО ЭТО по имени файла):")
         for d in docs:
-            print("   . [%s] %s" % (d.get("label", "?"), (d.get("name", "?") or "")[:70]))
+            kind = R.classify_doc(d.get("label", ""), d.get("name", "")) or "?"
+            print("   . [%s] %s  ==>  %s" % (d.get("label", "?"), (d.get("name", "?") or "")[:60], kind))
     else:
         print("\n! вложений в карточке не видно")
-    print("\nЧитаю через Claude API:")
+    print("\nЧитаю через Claude API (по СОДЕРЖИМОМУ, не по названию поля):")
     res = S.read_zayavka_docs(num, read_contract=not cheap,
                               progress=lambda st, m: print("   ->", m))
     if res.get("error"):
         print("\nx РЕЗУЛЬТАТ: в базу НЕ записано —", res["error"])
+        if res.get("doc_kinds"):
+            print("  ИИ увидел типы документов:", res["doc_kinds"])
         print("  (это не баг: пустую строку в накопитель мы намеренно не пишем)")
         return
+    if res.get("doc_kinds"):
+        print("\nИИ увидел в документах:", res["doc_kinds"])
     c = S._db()
     row = c.execute("""SELECT article,total,vypolneno,contract_no,avans_sum,retention_pct,
                        retention_sum,barter,object,account,bin,read_ts FROM nakopitel WHERE num=?""",
