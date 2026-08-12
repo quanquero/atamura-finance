@@ -158,7 +158,7 @@ AVR_INSTRUCTION = (
 # --- счёт → сумма к оплате (для услуг/поставок сумма именно тут, а не в договоре) ---
 INVOICE_JSON_SCHEMA = {
     "type": "object",
-    "properties": {"total": _N, "account": _S, "account_date": _S, "nds": _S, "supplier": _S},
+    "properties": {"total": _NUM, "account": _STR, "account_date": _STR, "nds": _STR, "supplier": _STR},
     "required": ["total", "account", "account_date", "nds", "supplier"],
     "additionalProperties": False,
 }
