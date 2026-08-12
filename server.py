@@ -536,7 +536,7 @@ def zayavka_card(num):
     payments = sorted(({"date": d, "amount": a, "account": _account_from(p), "object": _object_from(p)}
                        for d, a, p in pays if _num_from(p) == str(num)), key=lambda x: x["date"] or "")
     nk = None
-    if nkrow:
+    if nkrow and (nkrow[0] or (nkrow[1] or 0) or (nkrow[4] or "")):   # есть договор ИЛИ сумма ИЛИ статья
         nk = {"contract_no": nkrow[0], "total": nkrow[1], "object": nkrow[2], "ochered": nkrow[3],
               "article": nkrow[4], "notes": nkrow[5], "bin": nkrow[6], "avans": nkrow[7],
               "retention": nkrow[8], "barter": bool(nkrow[9]), "barter_sum": nkrow[10]}
@@ -593,10 +593,12 @@ def _nk_pipeline(num, bin_override="", progress=None):
         except Exception: pass
     binf = bin_override or NK._find_bin(item, title)
     if not paths:
-        store_nakopitel(num, binf, {"error": "нет вложений"}, title)
-        return {"error": "нет вложений в заявке", "num": str(num)}
+        return {"error": "нет вложений в заявке", "num": str(num)}     # пустую строку НЕ пишем
     P("read", f"ИИ читает договор ({len(paths)} файл.) через Claude API…")
     terms = R.read_docs(paths, R.NAKOPITEL_INSTRUCTION, R.NAKOPITEL_SCHEMA)
+    if (terms or {}).get("error") or not (terms.get("contract_no") or terms.get("total") or terms.get("article")):
+        return {"error": (terms or {}).get("error") or "документы не распознаны как договор",
+                "num": str(num), "terms": terms}                        # не сохраняем пустышку
     if not binf:                                   # БИН не нашёлся в заявке — берём из договора (ИИ)
         bcand = re.sub(r"\D", "", str((terms or {}).get("bin", "")))
         if len(bcand) == 12:
@@ -650,8 +652,8 @@ def read_zayavka_docs(num, read_contract=True, progress=None):
     avr = R.read_purpose(item, "avr", R.AVR_INSTRUCTION, R.AVR_JSON_SCHEMA) or {}
     if avr and not avr.get("error"):
         terms["vypolneno"] = float(avr.get("vypolneno_sum") or 0)
-    if not terms:
-        return {"num": str(num), "error": "нет документов (договор/тех.требование/АВР) для чтения"}
+    if not (terms.get("article") or terms.get("total") or terms.get("vypolneno")):
+        return {"num": str(num), "error": "не извлёк ни статью, ни сумму, ни выполнено (нет читаемых документов)"}
     binf = terms.get("bin") or NK._find_bin(item, title)
     P("save", "Сохраняю в накопитель…")
     store_nakopitel(num, binf, terms, title)
