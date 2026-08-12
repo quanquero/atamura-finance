@@ -623,8 +623,9 @@ def read_nakopitel(num, bin_override=""):
 
 
 def read_zayavka_docs(num, read_contract=True, progress=None):
-    """Field-aware чтение заявки по НАЗНАЧЕНИЮ полей: договор→условия(+статья), иначе тех.требование→статья;
-    АВР→выполнено. Кладёт в накопитель. Дёшево при read_contract=False (только тех.требование + АВР)."""
+    """Field-aware чтение ВСЕХ документов заявки по назначению и склейка:
+    Тех.требование→статья · Счёт→сумма/№ · Договор→условия(аванс/удержание/бартер) · АВР→выполнено.
+    read_contract=False — без тяжёлого договора (тех.требование+счёт+АВР, дёшево)."""
     def P(st, m):
         if progress:
             progress(st, m)
@@ -635,23 +636,46 @@ def read_zayavka_docs(num, read_contract=True, progress=None):
         return {"error": "заявка не найдена в Bitrix", "num": str(num)}
     title = item.get("title", "")
     terms = {}
+    # 1) статья ← тех.требование (дёшево, есть почти у всех)
+    P("read", "ИИ: тех.требование → статья…")
+    art = R.read_purpose(item, "article", R.ARTICLE_INSTRUCTION, R.ARTICLE_JSON_SCHEMA) or {}
+    if art and not art.get("error"):
+        if art.get("article"):
+            terms["article"] = art["article"]
+        terms["object"] = art.get("object", "") or terms.get("object", "")
+        terms["ochered"] = art.get("ochered", "") or terms.get("ochered", "")
+        terms["notes"] = art.get("work_desc", "") or terms.get("notes", "")
+    # 2) сумма ← счёт (для услуг/поставок сумма именно тут)
+    P("read", "ИИ: счёт → сумма…")
+    inv = R.read_purpose(item, "invoice", R.INVOICE_INSTRUCTION, R.INVOICE_JSON_SCHEMA) or {}
+    if inv and not inv.get("error"):
+        if inv.get("total"):
+            terms["total"] = float(inv["total"])
+        if inv.get("account"):
+            terms["account"] = inv["account"]
+        if inv.get("nds"):
+            terms["nds"] = inv["nds"]
+    # 3) условия ← договор (аванс/удержание/бартер; + total/статья, если ещё нет)
     if read_contract:
-        P("read", "ИИ читает договор (условия)…")
-        t = R.read_purpose(item, "contract", R.NAKOPITEL_INSTRUCTION, R.NAKOPITEL_SCHEMA) or {}
-        if t and not t.get("error"):
-            terms = t
-    if not terms.get("article"):
-        P("read", "ИИ читает тех.требование (статья)…")
-        art = R.read_purpose(item, "article", R.ARTICLE_INSTRUCTION, R.ARTICLE_JSON_SCHEMA) or {}
-        if art and not art.get("error") and art.get("article"):
-            terms.setdefault("article", art.get("article", ""))
-            terms["object"] = terms.get("object") or art.get("object", "")
-            terms["ochered"] = terms.get("ochered") or art.get("ochered", "")
-            terms["notes"] = terms.get("notes") or art.get("work_desc", "")
-    P("read", "ИИ читает АВР (выполнено)…")
+        P("read", "ИИ: договор → условия…")
+        con = R.read_purpose(item, "contract", R.NAKOPITEL_INSTRUCTION, R.NAKOPITEL_SCHEMA) or {}
+        if con and not con.get("error"):
+            for k in ("contract_no", "contract_date", "avans_sum", "avans_pct",
+                      "retention_sum", "retention_pct", "barter", "barter_sum"):
+                if con.get(k):
+                    terms[k] = con[k]
+            terms["article"] = terms.get("article") or con.get("article", "")
+            terms["object"] = terms.get("object") or con.get("object", "")
+            terms["ochered"] = terms.get("ochered") or con.get("ochered", "")
+            if not terms.get("total") and con.get("total"):
+                terms["total"] = con["total"]
+            if con.get("bin"):
+                terms["bin"] = con["bin"]
+    # 4) выполнено ← АВР
+    P("read", "ИИ: АВР → выполнено…")
     avr = R.read_purpose(item, "avr", R.AVR_INSTRUCTION, R.AVR_JSON_SCHEMA) or {}
-    if avr and not avr.get("error"):
-        terms["vypolneno"] = float(avr.get("vypolneno_sum") or 0)
+    if avr and not avr.get("error") and avr.get("vypolneno_sum"):
+        terms["vypolneno"] = float(avr["vypolneno_sum"])
     if not (terms.get("article") or terms.get("total") or terms.get("vypolneno")):
         return {"num": str(num), "error": "не извлёк ни статью, ни сумму, ни выполнено (нет читаемых документов)"}
     binf = terms.get("bin") or NK._find_bin(item, title)

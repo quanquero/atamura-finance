@@ -155,6 +155,18 @@ AVR_INSTRUCTION = (
     "act_no/act_date = № и дата акта; all_signed = подписан ли ВСЕМИ сторонами (заказчик+подрядчик, "
     "есть подписи и печати) true/false; notes — что принято, одной строкой.")
 
+# --- счёт → сумма к оплате (для услуг/поставок сумма именно тут, а не в договоре) ---
+INVOICE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {"total": _N, "account": _S, "account_date": _S, "nds": _S, "supplier": _S},
+    "required": ["total", "account", "account_date", "nds", "supplier"],
+    "additionalProperties": False,
+}
+INVOICE_INSTRUCTION = (
+    "Перед тобой СЧЁТ НА ОПЛАТУ. Извлеки: total = ИТОГОВАЯ сумма к оплате по счёту (число, с НДС если "
+    "итог с НДС); account = № счёта; account_date = дата счёта; nds = режим НДС (с НДС/без НДС); "
+    "supplier = поставщик (кому платят).")
+
 
 def download(url):
     """Скачать вложение → путь. Тип по magic-bytes. Кэш по md5 (повторно не качаем)."""
