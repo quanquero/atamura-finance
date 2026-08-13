@@ -71,7 +71,8 @@ def _check_session(cookie):
 
 
 def _db():
-    c = sqlite3.connect(DB)
+    c = sqlite3.connect(DB, timeout=30)
+    c.execute("PRAGMA busy_timeout=30000")           # параллельные воркеры чтения — переживём блокировку записи
     c.execute("""CREATE TABLE IF NOT EXISTS flow(
         company TEXT, kind TEXT, doc TEXT, number TEXT, date TEXT, bin TEXT, name TEXT,
         amount REAL, vidop TEXT, supplier INT, purpose TEXT, comment TEXT, dogovor_key TEXT)""")
@@ -792,29 +793,44 @@ def queue_stats():
             "read": read, "top": allr[:200]}
 
 
+PROC_WORKERS = int(os.environ.get("PROC_WORKERS", "6"))     # параллельных чтений (API — I/O-bound, потоки ок)
+
+
 def _run_process_job(jid, n):
-    """Фоновая обработка: читает документы top-n непрочитанных оплаченных заявок (по сумме)."""
+    """Фоновая обработка: читает документы top-n непрочитанных оплаченных заявок (по сумме),
+    ПАРАЛЛЕЛЬНО пулом воркеров (PROC_WORKERS). Чтение — сетевой вызов API, потоки эффективны."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     try:
         rows = queue_zayavki(limit=n)
         total = len(rows)
         if not total:
             _job(jid, "done", "Очередь пуста — всё прочитано", done=True, result={"total": 0, "done": []})
             return
-        done = []
-        for i, r in enumerate(rows, 1):
-            _job(jid, "read", f"[{i}/{total}] №{r['num']} · {r['object']} · оплачено {money(r['paid'])} ₸",
-                 result={"i": i, "total": total, "done": done})
+        done, lock = [], threading.Lock()
+
+        def work(r):
             try:
                 res = read_zayavka_docs(r["num"], read_contract=True)
             except Exception as e:
                 res = {"error": str(e)[:200]}
-            done.append({"num": r["num"], "object": r["object"], "paid": r["paid"],
-                         "ok": bool(res.get("ok")), "article": res.get("article", ""),
-                         "total": res.get("total", 0), "vypolneno": res.get("vypolneno", 0),
-                         "doc_kinds": res.get("doc_kinds", ""), "error": res.get("error", "")})
+            row = {"num": r["num"], "object": r["object"], "paid": r["paid"],
+                   "ok": bool(res.get("ok")), "article": res.get("article", ""),
+                   "total": res.get("total", 0), "vypolneno": res.get("vypolneno", 0),
+                   "doc_kinds": res.get("doc_kinds", ""), "error": res.get("error", "")}
+            with lock:
+                done.append(row)
+                okn = sum(1 for d in done if d["ok"])
+                _job(jid, "read", f"[{len(done)}/{total}] прочитано {okn} · последняя №{r['num']} · {r['object']}",
+                     result={"i": len(done), "total": total, "done": done})
+            return row
+
+        with ThreadPoolExecutor(max_workers=max(1, min(PROC_WORKERS, total))) as ex:
+            futs = [ex.submit(work, r) for r in rows]
+            for _ in as_completed(futs):
+                pass
         okn = sum(1 for d in done if d["ok"])
-        _job(jid, "done", f"Готово: прочитано {okn} из {total}", done=True,
-             result={"i": total, "total": total, "done": done})
+        _job(jid, "done", f"Готово: прочитано {okn} из {total} (в {min(PROC_WORKERS, total)} потоков)",
+             done=True, result={"i": total, "total": total, "done": done})
     except Exception as e:
         _job(jid, "error", str(e)[:200], done=True)
 

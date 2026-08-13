@@ -348,7 +348,8 @@ def read_docs(paths, instruction, schema_hint=None):
     if not ok:
         return {"error": "нет читаемых вложений"}
     schema = schema_hint or NAKOPITEL_JSON_SCHEMA      # ← уважаем схему задачи (АВР/счёт/статья), не форсим накопитель
-    model = os.environ.get("CLAUDE_MODEL", "claude-opus-5")
+    model = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")   # извлечение из доков — sonnet быстрее/дешевле opus
+    effort = os.environ.get("CLAUDE_EFFORT", "low")             # структурированное извлечение — low хватает, быстрее
     import time
     last = ""
     for attempt in range(4):
@@ -357,7 +358,7 @@ def read_docs(paths, instruction, schema_hint=None):
             resp = client.messages.create(
                 model=model, max_tokens=8000,
                 output_config={"format": {"type": "json_schema", "schema": schema},
-                               "effort": "medium"},
+                               "effort": effort},
                 messages=[{"role": "user", "content": content}],
             )
         except Exception as e:
