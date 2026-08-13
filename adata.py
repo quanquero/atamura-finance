@@ -20,8 +20,24 @@ def _get(url):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     return json.loads(urllib.request.urlopen(req, timeout=25, context=_CTX).read().decode("utf-8", "replace"))
 
+# Модули Adata: slug для Get Request → человеческое имя. Check у ВСЕХ общий: company/info/check
+# (в доке check для basic/status/tax-dynamics = info/check). Добавлять модули — одной строкой.
+MODULES = {
+    "info":                   "Сводная информация",
+    "basic":                  "Базовая информация",
+    "status":                 "Статус предприятия (лжепредприятие/банкрот/нет по адресу/налог.долг)",
+    "tax":                    "Сводная информация по налогам",
+    "tax-deduction/dynamics": "Налоги в динамике по годам",
+    # по мере получения slug'ов из доки — добавить сюда:
+    # "court": "Судебные разбирательства", "sanctions": "Санкции",
+    # "license": "Лицензии и сертификаты", "executive": "Исполнительные производства",
+    # "founder": "Учредители", "beneficiary": "Конечный бенефициар",
+}
+
+
 def fetch(bin_, dtype="info", tries=8, delay=2):
-    """Возвращает dict данных Adata по БИН (по умолчанию 'info' — сводная справка)."""
+    """Данные Adata по БИН для одного модуля. Get Request = company/{dtype}/…,
+    Check Request = company/info/check/… (общий для всех модулей)."""
     T = _token()
     if not T: raise RuntimeError("ADATA_TOKEN не задан (env или .env)")
     g = _get("https://api.adata.kz/api/company/%s/%s?iinBin=%s" % (dtype, T, bin_))
@@ -29,9 +45,20 @@ def fetch(bin_, dtype="info", tries=8, delay=2):
     if not rt: return {"error": g.get("message", "нет request-токена")}
     for _ in range(tries):
         time.sleep(delay)
-        c = _get("https://api.adata.kz/api/company/%s/check/%s?token=%s" % (dtype, T, rt))
-        if c.get("data"): return c["data"]
+        c = _get("https://api.adata.kz/api/company/info/check/%s?token=%s" % (T, rt))
+        if c.get("data"): return c["data"]           # 200 «Данные готовятся» → data пусто, ждём и повторяем
     return {"error": "данные ещё готовятся (timeout)"}
+
+
+def fetch_modules(bin_, modules=None):
+    """Несколько модулей по БИН → {slug: data|{'error':…}}. По умолчанию все из MODULES."""
+    out = {}
+    for m in (modules or list(MODULES)):
+        try:
+            out[m] = fetch(bin_, dtype=m)
+        except Exception as e:
+            out[m] = {"error": str(e)[:200]}
+    return out
 
 # ---------- рендер справки ----------
 def _money(x): return format(int(round(x or 0)), ",d").replace(",", " ")

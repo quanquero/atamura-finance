@@ -30,6 +30,9 @@ def main():
         print("✕ Не удалось получить справку:", (info or {}).get("error", "пусто"))
         print("  Проверь: ADATA_TOKEN задан? БИН верный (12 цифр)? Сеть до api.adata.kz есть?")
         return
+    # отдельный модуль status — даёт сильные флаги СБ, которых нет в сводке info
+    st = adata.fetch(bn, dtype="status")
+    st = st if isinstance(st, dict) and not st.get("error") else {}
     b = info.get("basic", {}); s = info.get("status", {})
     rf = info.get("riskFactor", {}).get("company", {}); req = info.get("requisites", {})
     print("=" * 60)
@@ -44,10 +47,16 @@ def main():
     print("\n  🚦 ФЛАГИ СБ:")
     def flag(name, bad, extra=""):
         print("     %s %s%s" % ("🔴" if bad else "🟢", name, (" · " + extra) if extra else ""))
-    flag("Действующая", not s.get("company_status"), "" if s.get("company_status") else "СТАТУС НЕ ДЕЙСТВУЮЩИЙ")
-    flag("Банкротство", s.get("bankcrupt"))
-    flag("Налоговая задолженность", bool(s.get("tax_debt")), (_m(s.get("tax_debt")) + " ₸") if s.get("tax_debt") else "")
-    flag("Нарушения по налогам", s.get("violation_tax"))
+    flag("Действующая", not (st.get("company_status", s.get("company_status"))),
+         "" if st.get("company_status", s.get("company_status")) else "СТАТУС НЕ ДЕЙСТВУЮЩИЙ")
+    flag("Лжепредприятие (в списке)", st.get("pseudo_company"))
+    flag("Бездействующее", st.get("inactive"))
+    flag("Отсутствует по юр.адресу", st.get("absent_at_address"))
+    flag("Регистрация недействительна", st.get("registration_invalid"))
+    flag("Банкротство", st.get("bankcrupt", s.get("bankcrupt")))
+    tdebt = st.get("tax_debt", s.get("tax_debt"))
+    flag("Налоговая задолженность", bool(tdebt), (_m(tdebt) + " ₸") if tdebt else "")
+    flag("Нарушения по налогам (реорг.)", st.get("violation_tax", s.get("violation_tax")))
     flag("Арест счетов", rf.get("seized_bank_account"))
     flag("Арест имущества", rf.get("seized_property"))
     flag("Исполнительное производство", rf.get("enforcement_debt"))
@@ -61,6 +70,15 @@ def main():
         print("\n  Аффилированные (по руководителю):")
         for c in aff[:8]:
             print("     · %s — %s %s" % (c.get("name", ""), c.get("type", ""), c.get("bin", "")))
+    if "--full" in args:
+        print("\n  📦 ВСЕ МОДУЛИ ADATA по БИН (что доступно на аккаунте):")
+        mods = adata.fetch_modules(bn)
+        for slug, data in mods.items():
+            name = adata.MODULES.get(slug, slug)
+            ok = isinstance(data, dict) and not data.get("error")
+            n = len(data) if isinstance(data, dict) else 0
+            print("     %s %-26s %s" % ("🟢" if ok else "🔴", slug,
+                                        ("(%d полей)" % n) if ok else ("— " + str((data or {}).get("error", "")))))
     if "--html" in args:
         os.makedirs("out", exist_ok=True)
         p = os.path.join("out", "spravka_%s.html" % bn)
