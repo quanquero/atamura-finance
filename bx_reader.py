@@ -307,6 +307,28 @@ def _pdf_prepare(path, max_bytes=18_000_000, max_pages=40):
         return path
 
 
+def _image_prepare(path, max_side=1568, max_bytes=4_500_000):
+    """Крупный скан → даунскейл до max_side по длинной стороне (лимиты API + скорость/цена).
+    Best-effort: без Pillow или на ошибке — исходник."""
+    try:
+        if os.path.getsize(path) <= max_bytes:
+            from PIL import Image
+            with Image.open(path) as im:
+                if max(im.size) <= max_side:
+                    return path, path.lower().rsplit(".", 1)[-1]
+        from PIL import Image
+        with Image.open(path) as im:
+            im = im.convert("RGB")
+            k = max_side / float(max(im.size))
+            if k < 1:
+                im = im.resize((max(1, int(im.size[0] * k)), max(1, int(im.size[1] * k))))
+            outp = path + ".small.jpg"
+            im.save(outp, "JPEG", quality=82)
+        return outp, "jpg"
+    except Exception:
+        return path, path.lower().rsplit(".", 1)[-1]
+
+
 def _build_content(paths, instruction):
     """Content-блоки для Messages API: image (сканы) / document (PDF) + текст (docx/xlsx)."""
     blocks, extra, has_media = [], "", False
@@ -320,7 +342,8 @@ def _build_content(paths, instruction):
                                "source": {"type": "base64", "media_type": "application/pdf", "data": data}})
                 has_media = True
             elif low.endswith((".png", ".jpg", ".jpeg")):
-                media = "image/png" if low.endswith(".png") else "image/jpeg"
+                p, ext = _image_prepare(p)
+                media = "image/png" if ext == "png" else "image/jpeg"
                 data = base64.standard_b64encode(open(p, "rb").read()).decode()
                 blocks.append({"type": "image", "source": {"type": "base64", "media_type": media, "data": data}})
                 has_media = True

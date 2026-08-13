@@ -1450,7 +1450,7 @@ function rProcess(v){
         +'<td>'+esc((x.article||'').slice(0,30))+'</td>'
         +'<td class=num>'+(x.total?money(x.total):'—')+'</td>'
         +'<td class=num style=color:#7c3aed>'+(x.vypolneno?money(x.vypolneno):'—')+'</td>'
-        +'<td>'+(x.ok?'<span style=color:#0e7490>✓</span>':'<span style=color:#b91c1c>✕ '+esc((x.error||'').slice(0,28))+'</span>')+'</td>'
+        +'<td>'+(x.ok?'<span style=color:#0e7490>✓ сохранено</span>':'<span style=color:#b91c1c title="'+esc(x.error||'')+'">✕ '+esc((x.error||'').slice(0,70))+'</span>')+'</td>'
         +'</tr>';}).join('')+'</tbody></table></div></div>';
   }
   function load(){
@@ -1487,7 +1487,10 @@ function rProcess(v){
               prog.innerHTML='<div style="font-size:13px;color:#334155;margin-bottom:4px">'+esc(s.msg||'')+'</div>'
                 +'<div class=track style="height:12px"><div class="fill fi" style="width:'+pct+'%;background:#0ea5e9"></div></div>';
               var done=rr.done||[];if(done.length)renderRes(resHost,done);
-              if(s.done){clearInterval(poll);pgo.disabled=false;pmsg.textContent=s.msg||'готово';setTimeout(load,1000);}
+              if(s.done){clearInterval(poll);pgo.disabled=false;pmsg.textContent=s.msg||'готово';
+                fetch('queue.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(dd){
+                  strip.innerHTML=tl('y',dd.pending,'В очереди (не прочитано)')+tl('r',money(dd.pending_sum)+' ₸','Сумма в очереди')+tl('g',dd.read,'Прочитано ИИ');
+                }).catch(function(){});}   // обновляем ТОЛЬКО счётчики, результаты не стираем
             }).catch(function(e){clearInterval(poll);pgo.disabled=false;pmsg.textContent='ошибка опроса';});
           },1200);
         }).catch(function(e){pgo.disabled=false;pmsg.textContent='ошибка запуска';});
