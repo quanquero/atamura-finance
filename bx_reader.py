@@ -286,6 +286,27 @@ def _extract_json(text):
     return None
 
 
+def _pdf_prepare(path, max_bytes=18_000_000, max_pages=40):
+    """Крупный PDF (толстый скан-комбо) → первые max_pages страниц (счёт/АВР/КС-3 в начале,
+    объёмные исполнительные схемы в конце). Best-effort: без pypdf или на ошибке — возвращаем исходник."""
+    try:
+        if os.path.getsize(path) <= max_bytes:
+            return path
+        import pypdf
+        r = pypdf.PdfReader(path)
+        if len(r.pages) <= max_pages:
+            return path
+        w = pypdf.PdfWriter()
+        for i in range(max_pages):
+            w.add_page(r.pages[i])
+        outp = path + f".first{max_pages}.pdf"
+        with open(outp, "wb") as f:
+            w.write(f)
+        return outp
+    except Exception:
+        return path
+
+
 def _build_content(paths, instruction):
     """Content-блоки для Messages API: image (сканы) / document (PDF) + текст (docx/xlsx)."""
     blocks, extra, has_media = [], "", False
@@ -293,6 +314,7 @@ def _build_content(paths, instruction):
         low = p.lower()
         try:
             if low.endswith(".pdf"):
+                p = _pdf_prepare(p)
                 data = base64.standard_b64encode(open(p, "rb").read()).decode()
                 blocks.append({"type": "document",
                                "source": {"type": "base64", "media_type": "application/pdf", "data": data}})
@@ -327,23 +349,34 @@ def read_docs(paths, instruction, schema_hint=None):
         return {"error": "нет читаемых вложений"}
     schema = schema_hint or NAKOPITEL_JSON_SCHEMA      # ← уважаем схему задачи (АВР/счёт/статья), не форсим накопитель
     model = os.environ.get("CLAUDE_MODEL", "claude-opus-5")
-    try:
-        client = anthropic.Anthropic()
-        resp = client.messages.create(
-            model=model, max_tokens=8000,
-            output_config={"format": {"type": "json_schema", "schema": schema},
-                           "effort": "medium"},
-            messages=[{"role": "user", "content": content}],
-        )
-    except Exception as e:
-        return {"error": str(e)[:400]}
-    if resp.stop_reason == "refusal":
-        return {"error": "отказ модели (refusal)"}
-    text = next((b.text for b in resp.content if b.type == "text"), "")
-    try:
-        return json.loads(text)          # output_config.format гарантирует валидный JSON
-    except Exception:
-        return _extract_json(text) or {"error": "не распознал JSON", "raw": (text or "")[:400]}
+    import time
+    last = ""
+    for attempt in range(4):
+        try:
+            client = anthropic.Anthropic()
+            resp = client.messages.create(
+                model=model, max_tokens=8000,
+                output_config={"format": {"type": "json_schema", "schema": schema},
+                               "effort": "medium"},
+                messages=[{"role": "user", "content": content}],
+            )
+        except Exception as e:
+            last = str(e)[:400]; low = last.lower()
+            if "413" in last or "too large" in low or "request_too_large" in low:
+                return {"error": last, "too_large": True}          # слишком крупно — вызывающий читает по одному
+            if attempt < 3 and any(x in low for x in (
+                    "529", "overloaded", "429", "rate", "500", "502", "503", "504",
+                    "timeout", "timed out", "temporarily", "connection")):
+                time.sleep(2 * (attempt + 1)); continue            # транзиентная — ретрай с бэкоффом
+            return {"error": last}
+        if resp.stop_reason == "refusal":
+            return {"error": "отказ модели (refusal)"}
+        text = next((b.text for b in resp.content if b.type == "text"), "")
+        try:
+            return json.loads(text)          # output_config.format гарантирует валидный JSON
+        except Exception:
+            return _extract_json(text) or {"error": "не распознал JSON", "raw": (text or "")[:400]}
+    return {"error": last or "не удалось прочитать (ретраи исчерпаны)"}
 
 
 # строгая JSON-схема условий накопителя (structured outputs; additionalProperties=false обязателен)

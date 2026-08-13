@@ -638,6 +638,24 @@ def read_nakopitel(num, bin_override=""):
     return _nk_pipeline(num, bin_override)
 
 
+def _merge_terms(parts):
+    """Склейка результатов чтения нескольких файлов в один набор условий (для too_large-фолбэка)."""
+    money_keys = ("total", "vypolneno_sum", "avans_sum", "retention_sum", "barter_sum")
+    out = {}
+    for t in parts:
+        for k, v in (t or {}).items():
+            if k in money_keys:
+                out[k] = max(float(out.get(k) or 0), float(v or 0))
+            elif k == "doc_kinds":
+                cur = out.get(k, "")
+                out[k] = (cur + (", " if cur and v else "") + (v or "")).strip(", ")
+            elif k == "barter":
+                out[k] = out.get(k) or v
+            elif not out.get(k):
+                out[k] = v
+    return out
+
+
 def read_zayavka_docs(num, read_contract=True, progress=None):
     """Чтение ВСЕХ вложений заявки одним ИИ-проходом с полной схемой (устойчиво к мисфайлингу).
     Классифицируем по ИМЕНИ файла+ярлыку, дедупим одинаковые (один файл часто залит в несколько полей),
@@ -676,8 +694,17 @@ def read_zayavka_docs(num, read_contract=True, progress=None):
         return {"num": str(num), "error": "не удалось скачать вложения"}
     P("read", f"ИИ читает {len(paths)} документ(ов) через Claude API (по содержимому, не по полю)…")
     terms = R.read_docs(paths, R.NAKOPITEL_INSTRUCTION, R.NAKOPITEL_SCHEMA) or {}
+    if terms.get("too_large") and len(paths) > 1:
+        P("read", "Документы крупные — читаю по одному и склеиваю…")
+        parts = []
+        for p in paths:
+            r = R.read_docs([p], R.NAKOPITEL_INSTRUCTION, R.NAKOPITEL_SCHEMA) or {}
+            if not r.get("error"):
+                parts.append(r)
+        if parts:
+            terms = _merge_terms(parts)
     if terms.get("error"):
-        return {"num": str(num), "error": terms["error"]}
+        return {"num": str(num), "error": terms["error"], "too_large": terms.get("too_large", False)}
     if terms.get("vypolneno_sum"):
         terms["vypolneno"] = float(terms["vypolneno_sum"])
     if not (terms.get("article") or terms.get("total") or terms.get("vypolneno")):
