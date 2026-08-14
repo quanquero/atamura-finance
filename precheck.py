@@ -152,17 +152,20 @@ def _pays():
 def _nakopitel(num):
     c = S._db()
     r = c.execute("""SELECT bin,contract_no,total,avans_sum,retention_pct,retention_sum,
-                     barter,barter_sum,account,notes FROM nakopitel WHERE num=?""", (str(num),)).fetchone()
+                     barter,barter_sum,account,notes,vypolneno FROM nakopitel WHERE num=?""", (str(num),)).fetchone()
     c.close()
     return r
 
 
 def verdict(item, pays, read=True):
-    """Вердикт Шерлок+Баффет по заявке. read=True — прочитать договор, если накопителя ещё нет."""
+    """Вердикт Шерлок+Баффет по заявке. read=True — прочитать документы, если накопителя ещё нет."""
     num, supplier, amount = item["num"], item["supplier"], item["amount"]
     nk = _nakopitel(num)
     if not nk and read:
-        S.read_nakopitel(num)          # прочитать договор (Claude API) + сохранить
+        try:
+            S.read_zayavka_docs(num, read_contract=True)   # единый движок: договор+счёт+АВР по содержимому
+        except Exception:
+            pass
         nk = _nakopitel(num)
     buff, remarks, sher = {}, [], []
     # покрытие 1С: загружена ли база компании-плательщика (иначе «оплачено 0» — не факт)
@@ -174,10 +177,13 @@ def verdict(item, pays, read=True):
     fact = sum((p[2] or 0) for p in pays if S._num_from(p[4]) == num)
     # --- Баффет ---
     if nk:
-        _bin, cno, total, avans, rpct, rsum, barter, bsum, account, notes = nk
-        ostatok = (total or 0) - (avans or 0) - (rsum or 0) - (bsum or 0) - fact
+        _bin, cno, total, avans, rpct, rsum, barter, bsum, account, notes, vyp = nk
+        vyp = vyp or 0
+        # остаток к оплате = договор − удержание − бартер − уже оплачено (аванс уже входит в оплаты 1С, НЕ вычитаем повторно)
+        ostatok = (total or 0) - (rsum or 0) - (bsum or 0) - fact
         buff = {"contract_no": cno, "total": total or 0, "fact": fact, "ostatok": ostatok,
-                "retention_pct": rpct or 0, "retention_sum": rsum or 0, "barter": bool(barter)}
+                "retention_pct": rpct or 0, "retention_sum": rsum or 0, "barter": bool(barter),
+                "vypolneno": vyp}
         if amount > ostatok + 1:
             remarks.append("Сумма к оплате (%s) превышает остаток по договору (%s)" % (S.money(amount), S.money(ostatok)))
         if (rpct or 0) > 0 and (rsum or 0) <= 0:
@@ -190,11 +196,15 @@ def verdict(item, pays, read=True):
                                           "техник", "поставк", "товар", "материал"))
         is_works = (not services) and any(w in ctx for w in ("подряд", "работ", "смр", "отделк",
                                           "монолит", "кладк", "гидроизол", "устройств", "монтаж"))
-        # «без актов» — только когда есть распознанный договор подряда (иначе утверждать нечего)
-        if cno and is_works and "кс-2" not in low and "кс-3" not in low and "акт" not in low:
-            remarks.append("Счёт без подтверждающих актов (КС-2/КС-3)")
+        # ⭐ главная защита от переплаты: не платить больше, чем принято актами (АВР/КС-2/КС-3)
+        if vyp > 0:
+            if fact + amount > vyp + 1:
+                remarks.append("🔴 Оплата превышает принятые работы (АВР): к оплате %s + уже оплачено %s = %s > выполнено %s" %
+                               (S.money(amount), S.money(fact), S.money(fact + amount), S.money(vyp)))
+        elif is_works and cno and "кс-2" not in low and "кс-3" not in low and "акт" not in low:
+            remarks.append("🔴 Работы: актов выполнения (АВР/КС-2/КС-3) нет — оплата авансовая, не за принятые работы")
     else:
-        remarks.append("Договор не прочитан — накопитель не построен")
+        remarks.append("Договор/документы не прочитаны — накопитель не построен")
     # --- Adata: аресты счетов, налоговый долг, лимит НДС для ИП ---
     ad = _adata(binf) if binf else {}
     rf = ad.get("riskFactor", {}).get("company", {})
@@ -240,7 +250,10 @@ def verdict(item, pays, read=True):
     emp = fetch_comments(item["id"]) if item.get("id") else []
     if emp:
         store_comments(num, item["id"], emp)
-    return {"id": item["id"], "num": num, "supplier": supplier, "amount": amount,
+    # уровень вердикта: красный (🔴 в замечаниях/Шерлоке) → жёлтый (любые замечания/находки) → зелёный
+    red = any(str(x).startswith("🔴") for x in remarks + sher)
+    level = "red" if red else ("warn" if (remarks or sher) else "ok")
+    return {"id": item["id"], "num": num, "supplier": supplier, "amount": amount, "level": level,
             "buffett": buff, "sherlock": sher, "remarks": remarks, "comments": emp}
 
 
@@ -254,16 +267,22 @@ def comment_text(v):
     if b:
         L.append("  • Договор %s: %s ₸ · Оплачено 1С: %s · Остаток: %s" % (
             b.get("contract_no") or "—", S.money(b.get("total") or 0), S.money(b.get("fact") or 0), S.money(b.get("ostatok") or 0)))
+        L.append("  • Выполнено (АВР/КС): %s ₸%s" % (
+            S.money(b.get("vypolneno") or 0),
+            "  ⚠ актов нет" if not (b.get("vypolneno") or 0) else ""))
         L.append("  • Гар. удержание: %d%% (%s ₸) · Бартер: %s" % (
             int(b.get("retention_pct") or 0), S.money(b.get("retention_sum") or 0), "да" if b.get("barter") else "нет"))
     else:
-        L.append("  • договор не прочитан")
+        L.append("  • документы не прочитаны")
     L.append("")
     if v["remarks"]:
         L.append("⚠️ ЗАМЕЧАНИЯ (%d)" % len(v["remarks"]))
         L += ["  %d. %s" % (i, r) for i, r in enumerate(v["remarks"], 1)]
-    else:
-        L.append("✅ Без замечаний — можно к оплате")
+        L.append("")
+    lvl = v.get("level", "warn" if v["remarks"] else "ok")
+    L.append({"red":  "⛔ СТОП: красные флаги — не платить без разбора",
+              "warn": "⚠️ Есть на что посмотреть перед оплатой",
+              "ok":   "✅ Без замечаний — можно к оплате"}[lvl])
     if v.get("comments"):
         L += ["", "💬 В карточке %d заметок сотрудников — учтите при решении" % len(v["comments"])]
     return "\n".join(L)
