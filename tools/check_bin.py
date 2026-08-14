@@ -2,6 +2,8 @@
 """Ручная проверка контрагента по БИН через Adata (запрос с сервера).
 
     python3 tools/check_bin.py 240440035749          # печать сводки в терминал
+    python3 tools/check_bin.py 240440035749 --sb      # + карточка СБ (риски/суды/санкции/лицензии)
+    python3 tools/check_bin.py 240440035749 --full    # + прогон всех модулей Adata (что доступно)
     python3 tools/check_bin.py 240440035749 --html    # + сохранить полную HTML-справку в out/
 
 Требует ADATA_TOKEN в окружении/.env (см. adata.py)."""
@@ -70,6 +72,30 @@ def main():
         print("\n  Аффилированные (по руководителю):")
         for c in aff[:8]:
             print("     · %s — %s %s" % (c.get("name", ""), c.get("type", ""), c.get("bin", "")))
+    if "--sb" in args:
+        print("\n  🛡️  КАРТОЧКА СБ (модули благонадёжности Adata) … (несколько запросов, подожди)")
+        card = adata.sb_card(bn)
+        bad = [f for f in card["flags"] if f["bad"]]
+        print("     Лицензий: %s · Режим налогов: %s · Суды (гр/уг/адм): %d/%d/%d" % (
+            card["licenses"] or "—", card["tax_mode"] or "—",
+            card["courts"]["civil"], card["courts"]["criminal"], card["courts"]["admin"]))
+        if bad:
+            print("     🔴 КРАСНЫЕ ФЛАГИ (%d):" % len(bad))
+            for f in bad:
+                print("        🔴 %s%s" % (f["name"], (" · " + f["extra"]) if f["extra"] else ""))
+        else:
+            print("     🟢 красных флагов по благонадёжности не найдено")
+        # санкции — по названию компании
+        nm = b.get("short_name") or b.get("name_ru", "")
+        if nm:
+            try:
+                sanc = adata.fetch_sanctions(nm)
+                dets = (sanc or {}).get("details", []) if isinstance(sanc, dict) else []
+                hits = [d for d in dets if (d.get("percentage") or d.get("highest_percentage") or 0) >= 85]
+                print("     %s Санкционные списки: %s" % ("🔴" if hits else "🟢",
+                      ("совпадений %d (проверить!)" % len(hits)) if hits else "не найдено"))
+            except Exception as e:
+                print("     ⚠ санкции: %s" % str(e)[:80])
     if "--full" in args:
         print("\n  📦 ВСЕ МОДУЛИ ADATA по БИН (что доступно на аккаунте):")
         mods = adata.fetch_modules(bn)

@@ -26,13 +26,20 @@ MODULES = {
     "info":                   "Сводная информация",
     "basic":                  "Базовая информация",
     "status":                 "Статус предприятия (лжепредприятие/банкрот/нет по адресу/налог.долг)",
+    "riskfactor":             "Факторы риска (предприятие + руководитель)",
+    "trustworthy-extended":   "Неблагонадёжные реестры",
+    "trustworthy-plus":       "Расширенные признаки благонадёжности",
+    "rehab-bankruptcy":       "Реабилитация и банкротство",
+    "risk-check":             "Реестр проверок и имущества",
+    "courtcase":              "Судебные разбирательства (сводная)",
+    "license":                "Лицензии (сводная)",
+    "licenses-certificates":  "Сертификаты",
+    "tax-mode":               "Режим налогообложения",
     "tax":                    "Сводная информация по налогам",
     "tax-deduction/dynamics": "Налоги в динамике по годам",
-    # по мере получения slug'ов из доки — добавить сюда:
-    # "court": "Судебные разбирательства", "sanctions": "Санкции",
-    # "license": "Лицензии и сертификаты", "executive": "Исполнительные производства",
-    # "founder": "Учредители", "beneficiary": "Конечный бенефициар",
+    "tax-debt/details":       "Задолженность по налогам (детально)",
 }
+# Санкции — ОСОБЫЙ модуль: по НАЗВАНИЮ (keyword), одношаговый (без check). См. fetch_sanctions().
 
 
 def fetch(bin_, dtype="info", tries=8, delay=2):
@@ -59,6 +66,70 @@ def fetch_modules(bin_, modules=None):
         except Exception as e:
             out[m] = {"error": str(e)[:200]}
     return out
+
+
+def fetch_sanctions(keyword, page=1):
+    """Санкции — по НАЗВАНИЮ компании (не БИН), ОДНОШАГОВЫЙ (без check-поллинга)."""
+    import urllib.parse
+    T = _token()
+    if not T:
+        raise RuntimeError("ADATA_TOKEN не задан")
+    r = _get("https://api.adata.kz/api/company/sanction/%s?keyword=%s&page=%d" %
+             (T, urllib.parse.quote(str(keyword or "")), page))
+    return r.get("data", r) if isinstance(r, dict) else r
+
+
+def _ok(x):
+    return x if isinstance(x, dict) and not x.get("error") else {}
+
+
+def sb_card(bin_):
+    """Карточка службы безопасности по БИН: тянет ключевые модули благонадёжности и собирает флаги.
+    ⚠ несколько запросов с поллингом — займёт несколько секунд."""
+    rf = _ok(fetch(bin_, "riskfactor"))
+    tr = _ok(fetch(bin_, "trustworthy-extended"))
+    st = _ok(fetch(bin_, "status"))
+    cc = _ok(fetch(bin_, "courtcase"))
+    lic = _ok(fetch(bin_, "license"))
+    tm = _ok(fetch(bin_, "tax-mode"))
+    co = rf.get("company", {}) if isinstance(rf.get("company"), dict) else {}
+    hd = rf.get("head", {}) if isinstance(rf.get("head"), dict) else {}
+    flags = []
+
+    def F(name, bad, extra=""):
+        flags.append({"name": name, "bad": bool(bad), "extra": extra})
+
+    # предприятие
+    F("Не действующая", st.get("company_status") is False)
+    F("Лжепредприятие", st.get("pseudo_company"))
+    F("Сделки без факт. выполнения (фиктив)", co.get("irresponsible_taxpayer") or tr.get("workless_taxpayer"))
+    F("Банкрот / ликвидация", co.get("bankrupt") or co.get("bankruptcy_decision") or co.get("liquidating_taxpayer"))
+    F("Реабилитация (банкротство)", co.get("bankruptcy_rehabilitation") or tr.get("rehabilitation"))
+    F("Арест счетов", co.get("seized_bank_account"))
+    F("Арест имущества", co.get("seized_property") or tr.get("transport_arrest"))
+    F("Исполнительное производство", co.get("enforcement_debt"),
+      (_money(co.get("enforcement_debt_sum")) + " ₸") if co.get("enforcement_debt_sum") else "")
+    F("Налоговая задолженность", st.get("tax_debt") or tr.get("tax_arrears_150"),
+      (_money(st.get("tax_debt")) + " ₸") if st.get("tax_debt") else "")
+    F("Высокая степень налог. риска", str(co.get("tax_risk_degree", "")).lower() in ("высокая", "high", "красная"),
+      co.get("tax_risk_degree", ""))
+    F("Нет по юр. адресу", tr.get("wrong_address"))
+    F("Ограничение выписки ЭСФ", tr.get("esf_bounded") or tr.get("esf_withdrawn") or tr.get("esf_suspended"))
+    F("Налоговая проверка в этом году", tr.get("first_half_tax_inspection") or tr.get("second_half_tax_inspection"))
+    # руководитель — тяжёлые
+    F("Рук.: терроризм/экстремизм", hd.get("terrorist") or hd.get("terrorism_involved"))
+    F("Рук.: в розыске", hd.get("citizen_hiding_from_investigation"))
+    F("Рук.: педофил/алименты/пропал без вести", hd.get("pedophile") or hd.get("alimony_payer") or hd.get("missing"))
+    F("Рук.: запрет на выезд", hd.get("ban_leaving"))
+    F("Рук.: проблемные компании (тот же директор)", tr.get("same_director_problem_company"))
+    return {
+        "flags": flags,
+        "licenses": lic.get("total_licenses_count", 0),
+        "tax_mode": tm.get("tax_mode", ""),
+        "courts": {"civil": cc.get("total_civil_count", 0),
+                   "criminal": cc.get("total_criminal_count", 0),
+                   "admin": cc.get("total_administrative_count", 0)},
+    }
 
 # ---------- рендер справки ----------
 def _money(x): return format(int(round(x or 0)), ",d").replace(",", " ")
