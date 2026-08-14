@@ -50,6 +50,33 @@ def _adata(bin_):
         return {}
 
 
+def _sb_flags(binf):
+    """Красные флаги контрагента из модулей благонадёжности Adata (riskfactor/реестры/суды).
+    Кэш в adata_sb по БИН — тянем один раз, дальше из кэша (Adata медленная/платная)."""
+    if not binf:
+        return []
+    c = S._db()
+    c.execute("CREATE TABLE IF NOT EXISTS adata_sb(bin TEXT PRIMARY KEY, json TEXT, ts TEXT)")
+    r = c.execute("SELECT json FROM adata_sb WHERE bin=?", (str(binf),)).fetchone()
+    c.close()
+    if r and r[0]:
+        try:
+            card = json.loads(r[0])
+        except Exception:
+            card = {}
+    else:
+        try:
+            import adata as A
+            card = A.sb_card(binf)
+        except Exception:
+            return []
+        c = S._db()
+        c.execute("INSERT OR REPLACE INTO adata_sb VALUES(?,?,?)",
+                  (str(binf), json.dumps(card, ensure_ascii=False), datetime.now().strftime("%Y-%m-%d %H:%M")))
+        c.commit(); c.close()
+    return [f for f in card.get("flags", []) if f.get("bad")]
+
+
 def _year_paid(bin_, pays, year):
     """Сумма оплат 1С контрагенту (по БИН) за календарный год (по данным ядра)."""
     return sum((p[2] or 0) for p in pays if p[6] == bin_ and str(p[3] or "")[:4] == str(year))
@@ -205,15 +232,11 @@ def verdict(item, pays, read=True):
             remarks.append("🔴 Работы: актов выполнения (АВР/КС-2/КС-3) нет — оплата авансовая, не за принятые работы")
     else:
         remarks.append("Договор/документы не прочитаны — накопитель не построен")
-    # --- Adata: аресты счетов, налоговый долг, лимит НДС для ИП ---
+    # --- Adata: контрагент-риски (модули благонадёжности) + лимит НДС для ИП ---
     ad = _adata(binf) if binf else {}
-    rf = ad.get("riskFactor", {}).get("company", {})
-    stt = ad.get("status", {})
     bsc = ad.get("basic", {})
-    if rf.get("seized_bank_account") or rf.get("seized_property"):
-        remarks.append("🔴 Аресты счетов/имущества у контрагента (Adata)")
-    if stt.get("tax_debt"):
-        remarks.append("Налоговая задолженность контрагента %s ₸ (Adata)" % S.money(stt.get("tax_debt")))
+    for f in _sb_flags(binf):        # аресты/фиктив.сделки/розыск/налог.долг/суды — из riskfactor+реестры
+        remarks.append("🔴 Контрагент: %s%s (Adata)" % (f["name"], (" · " + f["extra"]) if f.get("extra") else ""))
     is_ip = str(supplier).strip().lower().startswith("ип") or "индивид" in str(bsc.get("legal_form", "")).lower()
     if is_ip and not bsc.get("is_nds_payer") and binf:
         projected = _year_paid(binf, pays, datetime.now().year) + amount
