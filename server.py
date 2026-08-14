@@ -685,14 +685,17 @@ def read_zayavka_docs(num, read_contract=True, progress=None):
     if not uniq:
         return {"num": str(num), "error": "нет вложений в заявке"}
     P("download", f"Скачиваю вложения ({len(uniq)})…")
-    paths, kinds = [], []
+    paths, kinds, fileinfo = [], [], []
     for field, url, name, kind in uniq:
         try:
-            paths.append(R.download(url)); kinds.append(kind or "?")
+            pth = R.download(url)
+            paths.append(pth); kinds.append(kind or "?")
+            fileinfo.append("%s[%s]" % (name or "файл", os.path.splitext(pth)[1].lstrip(".") or "?"))
         except Exception:
             pass
     if not paths:
         return {"num": str(num), "error": "не удалось скачать вложения"}
+    files_desc = ", ".join(fileinfo)
     P("read", f"ИИ читает {len(paths)} документ(ов) через Claude API (по содержимому, не по полю)…")
     terms = R.read_docs(paths, R.NAKOPITEL_INSTRUCTION, R.NAKOPITEL_SCHEMA) or {}
     if terms.get("too_large") and len(paths) > 1:
@@ -709,7 +712,8 @@ def read_zayavka_docs(num, read_contract=True, progress=None):
     if terms.get("vypolneno_sum"):
         terms["vypolneno"] = float(terms["vypolneno_sum"])
     if not (terms.get("article") or terms.get("total") or terms.get("vypolneno")):
-        return {"num": str(num), "error": "документы не распознаны (ни статьи, ни суммы, ни выполнено)",
+        return {"num": str(num),
+                "error": "документы не распознаны (ни статьи, ни суммы, ни выполнено) · файлы: %s" % (files_desc or "—"),
                 "doc_kinds": terms.get("doc_kinds", "")}
     binf = terms.get("bin") or NK._find_bin(item, title)
     P("save", "Сохраняю в накопитель…")

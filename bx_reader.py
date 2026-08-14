@@ -220,7 +220,7 @@ def download(url):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, context=_CTX, timeout=60) as r:
         data = r.read()
-    head = data[:8]
+    head = data[:16]
     if head[:4] == b"%PDF":
         ext = "pdf"
     elif head[:2] == b"PK":
@@ -229,6 +229,10 @@ def download(url):
         ext = "jpg"                        # Read определяет тип по расширению — даём настоящее
     elif head[:8] == b"\x89PNG\r\n\x1a\n":
         ext = "png"
+    elif head[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        ext = "webp"                       # webp — конвертим в jpg при чтении
+    elif head[4:8] == b"ftyp" and head[8:12] in (b"heic", b"heif", b"heix", b"hevc", b"mif1", b"msf1"):
+        ext = "heic"                       # iPhone-фото — конвертим в jpg при чтении (нужен pillow-heif)
     else:
         ext = "bin"
     p = os.path.join(CACHE, f"{key}.{ext}")
@@ -308,25 +312,31 @@ def _pdf_prepare(path, max_bytes=18_000_000, max_pages=40):
 
 
 def _image_prepare(path, max_side=1568, max_bytes=4_500_000):
-    """Крупный скан → даунскейл до max_side по длинной стороне (лимиты API + скорость/цена).
-    Best-effort: без Pillow или на ошибке — исходник."""
+    """Готовим картинку к API: webp/heic → jpg (Claude их не принимает), крупный скан → даунскейл.
+    Возвращает (путь, 'jpg'|'png'). Best-effort: без Pillow — исходник как есть."""
+    ext = path.lower().rsplit(".", 1)[-1]
+    claude_ok = ext in ("jpg", "jpeg", "png")
     try:
-        if os.path.getsize(path) <= max_bytes:
+        if claude_ok and os.path.getsize(path) <= max_bytes:
             from PIL import Image
             with Image.open(path) as im:
                 if max(im.size) <= max_side:
-                    return path, path.lower().rsplit(".", 1)[-1]
+                    return path, ("png" if ext == "png" else "jpg")
+        try:
+            import pillow_heif; pillow_heif.register_heif_opener()   # для iPhone-HEIC
+        except Exception:
+            pass
         from PIL import Image
         with Image.open(path) as im:
             im = im.convert("RGB")
             k = max_side / float(max(im.size))
             if k < 1:
                 im = im.resize((max(1, int(im.size[0] * k)), max(1, int(im.size[1] * k))))
-            outp = path + ".small.jpg"
+            outp = path + ".conv.jpg"
             im.save(outp, "JPEG", quality=82)
         return outp, "jpg"
     except Exception:
-        return path, path.lower().rsplit(".", 1)[-1]
+        return path, ("png" if ext == "png" else "jpg")
 
 
 def _build_content(paths, instruction):
@@ -341,7 +351,7 @@ def _build_content(paths, instruction):
                 blocks.append({"type": "document",
                                "source": {"type": "base64", "media_type": "application/pdf", "data": data}})
                 has_media = True
-            elif low.endswith((".png", ".jpg", ".jpeg")):
+            elif low.endswith((".png", ".jpg", ".jpeg", ".webp", ".heic")):
                 p, ext = _image_prepare(p)
                 media = "image/png" if ext == "png" else "image/jpeg"
                 data = base64.standard_b64encode(open(p, "rb").read()).decode()
