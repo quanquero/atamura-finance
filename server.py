@@ -1574,7 +1574,7 @@ function openZayavka(num){
     var nk=d.nakopitel;
     h+='<h4>💰 Условия договора</h4>';
     if(nk){h+='<div class=nknote>Договор '+esc(nk.contract_no||'—')+' · <b>'+money(nk.total||0)+' ₸</b> · статья: <b>'+esc(nk.article||'—')+'</b> · объект: '+esc(nk.object||'—')+(nk.ochered?(' · '+esc(nk.ochered)):'')+(nk.retention?(' · удерж. '+money(nk.retention)):'')+(nk.barter?' · бартер':'')+(nk.notes?('<div style="margin-top:5px;color:#64748b">📄 '+esc(nk.notes)+'</div>'):'')+'</div>';}
-    else{h+='<div class=note>договор не прочитан. <button class=zkread style="padding:5px 12px;border:0;border-radius:7px;background:#0ea5e9;color:#fff;cursor:pointer;font-weight:600">Прочитать договор</button> <span class=zkmsg style="font-size:12px;color:#94a3b8"></span></div>';}
+    else{h+='<div class=note>документы не прочитаны. <button class=zkread style="padding:5px 12px;border:0;border-radius:7px;background:#0ea5e9;color:#fff;cursor:pointer;font-weight:600">Разобрать заявку (все документы)</button> <span class=zkmsg style="font-size:12px;color:#94a3b8"></span> <span style="color:#94a3b8;font-size:11px">— ИИ читает договор + счёт + тех.требование + АВР</span></div>';}
     var pr=(d.payments||[]).map(function(p){return '<tr><td>'+esc(p.date||'')+'</td><td>'+esc(p.object||'—')+'</td><td>'+esc(p.account||'—')+'</td><td class=num>'+money(p.amount)+'</td></tr>';}).join('')||'<tr><td colspan=4 style=color:#94a3b8>нет оплат 1С по заявке</td></tr>';
     h+='<h4>Оплаты 1С по заявке</h4><div class=tblscroll style="max-height:22vh"><table><thead><tr><th>Дата</th><th>Объект</th><th>Счёт</th><th class=num>Сумма</th></tr></thead><tbody>'+pr+'</tbody></table></div></div>';
     body.className='';body.style.padding='0';body.innerHTML=h;
