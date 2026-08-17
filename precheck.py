@@ -82,6 +82,20 @@ def _year_paid(bin_, pays, year):
     return sum((p[2] or 0) for p in pays if p[6] == bin_ and str(p[3] or "")[:4] == str(year))
 
 
+def _days_ago(d):
+    try:
+        return " (%d дн назад)" % (datetime.now() - datetime.strptime(str(d)[:10], "%Y-%m-%d")).days
+    except Exception:
+        return ""
+
+
+def _days_between(d1, d2):
+    try:
+        return abs((datetime.strptime(str(d2)[:10], "%Y-%m-%d") - datetime.strptime(str(d1)[:10], "%Y-%m-%d")).days)
+    except Exception:
+        return None
+
+
 BOT_MARK = "Проверка перед оплатой"        # наши комментарии-вердикты — не путать с сотрудничьими
 
 
@@ -201,7 +215,19 @@ def verdict(item, pays, read=True):
     if company and _canon(company) not in loaded:
         remarks.append("⚠ 1С по компании «%s» не загружена в ядро — оплаты/остаток могут быть неполны" % company)
     binf = nk[0] if nk else ""
-    fact = sum((p[2] or 0) for p in pays if S._num_from(p[4]) == num)
+    # 2-я нога матча: платёж привязываем по № заявки И по № счёта из накопителя (ловим платежи без № заявки)
+    acc_digits = re.sub(r"\D", "", str(nk[8] or "")) if nk else ""
+
+    def _match_pay(p):
+        if S._num_from(p[4]) == num:                     # основной ключ — № заявки
+            return True
+        if len(acc_digits) >= 6:                         # запасной — № счёта в назначении платежа
+            pd = re.sub(r"\D", "", p[4] or "")
+            if pd and (acc_digits in pd or pd in acc_digits):
+                return True
+        return False
+    already = [p for p in pays if _match_pay(p)]
+    fact = sum((p[2] or 0) for p in already)
     # --- Баффет ---
     if nk:
         _bin, cno, total, avans, rpct, rsum, barter, bsum, account, notes, vyp = nk
@@ -244,31 +270,38 @@ def verdict(item, pays, read=True):
             remarks.append("ИП превышает годовой лимит НДС: оборот ~%s ₸ (с этой оплатой) > %s ₸ — обязан встать на НДС" % (S.money(projected), S.money(NDS_LIMIT_IP)))
         elif projected > NDS_LIMIT_IP * 0.85:
             remarks.append("ИП близок к лимиту НДС: ~%s из %s ₸/год" % (S.money(projected), S.money(NDS_LIMIT_IP)))
-    # --- Шерлок (со временным контекстом: отличить «оплачено, не подвинули» от задвоения) ---
-    already = [p for p in pays if S._num_from(p[4]) == num]
+    # --- Шерлок: задвоение vs этапы (аванс+доплата) vs регулярная услуга ---
+    from collections import Counter
     if already:
         dates = sorted(p[3] for p in already if p[3])
-        last = dates[-1] if dates else ""
-        days = ""
-        try:
-            days = " (%d дн назад)" % (datetime.now() - datetime.strptime(last[:10], "%Y-%m-%d")).days
-        except Exception:
-            pass
-        paid = S.money(sum(p[2] or 0 for p in already))
-        if len(already) >= 2:
-            sher.append("🔴 По заявке УЖЕ %d оплаты на %s ₸ (%s)%s — деньги могли уйти дважды" %
-                        (len(already), paid, ", ".join(dates), days))
+        # одинаковая сумма 2+ раз по одной заявке = вероятное задвоение (одно и то же оплачено дважды)
+        amt_cnt = Counter(round(p[2] or 0) for p in already if (p[2] or 0) > 0)
+        same = [(a, cnt) for a, cnt in amt_cnt.items() if cnt >= 2]
+        if same:
+            a, cnt = max(same)
+            sher.append("🔴 Одинаковая сумма %s ₸ оплачена %d раз по заявке (%s) — вероятное ЗАДВОЕНИЕ" %
+                        (S.money(a), cnt, ", ".join(dates)))
+        elif len(already) >= 2:                          # разные суммы = скорее этапы, не красим
+            sher.append("По заявке %d оплаты на %s ₸ (%s) — если этапы (аванс+доплата), ок; повтор той же суммы = задвоение" %
+                        (len(already), S.money(fact), ", ".join(dates)))
         else:
-            sher.append("Оплачено %s ₸ от %s%s. Если это ОНА — заявку в «Закрыто»; если планируется "
-                        "НОВАЯ оплата — это задвоение" % (paid, last, days))
+            last = dates[-1] if dates else ""
+            sher.append("Оплачено %s ₸ от %s%s. Если это ОНА — заявку в «Закрыто»; новая оплата = задвоение" %
+                        (S.money(fact), last, _days_ago(last)))
+    # запасная эвристика по БИН+сумма: дубль ТОЛЬКО в узком окне; растянутое = регулярная услуга (не красим)
     if binf:
-        dups = [p for p in pays if p[6] == binf and abs((p[2] or 0) - amount) < 1]
+        dups = [p for p in pays if p[6] == binf and abs((p[2] or 0) - amount) < 1 and p[3]]
         if len(dups) >= 2:
-            dd = sorted({p[3] for p in dups if p[3]})
-            sher.append("Возможный дубль по контрагенту: тот же БИН и сумма встречались %d раз (%s)" %
-                        (len(dups), ", ".join(dd)))
+            dd = sorted(p[3] for p in dups)
+            span = _days_between(dd[0], dd[-1])
+            if span is not None and span <= 10:
+                sher.append("🔴 Тот же БИН+сумма %d раз за %d дн (%s) — вероятный дубль" %
+                            (len(dups), span, ", ".join(dd)))
+            else:
+                sher.append("Тот же БИН+сумма %d раз, растянуто на %s дн (%s) — похоже на регулярную услугу (аренда и т.п.), не дубль" %
+                            (len(dups), span if span is not None else "?", ", ".join(dd)))
     if not already and not binf:
-        sher.append("Заявка не сматчена с оплатами/договором — проверить вручную")
+        sher.append("Заявка не сматчена ни с оплатами, ни с договором — проверить вручную")
     # сотрудничьи комментарии из карточки — читаем и храним (там бывает важный контекст)
     emp = fetch_comments(item["id"]) if item.get("id") else []
     if emp:
