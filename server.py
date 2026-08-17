@@ -843,6 +843,22 @@ def money(n):
     return f"{n:,.0f}".replace(",", " ")
 
 
+def day_payments(date):
+    """Все платежи 1С за конкретную дату (YYYY-MM-DD): исходящие и входящие — для клика по дню в графике."""
+    c = _db()
+    rows = c.execute("""SELECT kind,company,name,bin,amount,purpose,doc,vidop FROM flow
+                        WHERE substr(date,1,10)=? ORDER BY amount DESC""", (str(date),)).fetchall()
+    c.close()
+    out, inc = [], []
+    for kind, company, name, binf, amount, purpose, doc, vidop in rows:
+        rec = {"company": company or "", "name": name or "", "bin": binf or "",
+               "amount": amount or 0, "purpose": purpose or "", "doc": doc or "",
+               "object": _object_from(purpose or "") or "—", "num": _num_from(purpose or "")}
+        (out if kind == "out" else inc).append(rec)
+    return {"date": str(date), "out": out, "in": inc,
+            "out_sum": sum(r["amount"] for r in out), "in_sum": sum(r["amount"] for r in inc)}
+
+
 # ---------- дашборд ----------
 CSS = """
 *{box-sizing:border-box}body{margin:0;background:#eef2f7;color:#1e293b;font:14px -apple-system,Segoe UI,Roboto,Arial}
@@ -1134,6 +1150,25 @@ function donutSVG(pairs,colors){
 function legend(pairs,colors){var tot=0;pairs.forEach(function(p){tot+=p[1];});tot=tot||1;
   return '<div class=lgrow>'+pairs.map(function(p){return '<div class=lgi><span class=sw style="background:'+(colors[p[0]]||'#94a3b8')+'"></span><span class=lgn>'+esc(p[0])+'</span><b>'+money(p[1])+'</b><span class=pc>'+Math.round(p[1]/tot*100)+'%</span></div>';}).join('')+'</div>';
 }
+function openDay(date){
+  openModal('<div class=nkhd><div class=t>Платежи за '+esc(date)+'</div><div class=s>исходящие и входящие 1С за сутки</div></div><div id=dayb class=note>загрузка…</div>');
+  fetch('day.json?date='+encodeURIComponent(date),{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+    var host=document.getElementById('dayb');if(!host)return;host.className='';
+    function tbl(rows,color){
+      if(!rows.length)return '<div class=note>нет платежей</div>';
+      return '<div class=tblscroll style="max-height:34vh"><table><thead><tr><th>Компания</th><th>Контрагент</th><th>Объект</th><th>№</th><th>Назначение</th><th class=num>Сумма</th></tr></thead><tbody>'
+        +rows.map(function(p){return '<tr'+(p.num?' style="cursor:pointer" data-num="'+esc(p.num)+'"':'')+'><td>'+esc(p.company||'—')+'</td><td>'+esc(p.name||'—')+'</td><td>'+esc(p.object||'—')+'</td><td>'+(p.num?('<b style=color:#0ea5e9>'+esc(p.num)+'</b>'):'—')+'</td><td style=color:#64748b>'+esc((p.purpose||'').slice(0,70))+'</td><td class=num style=color:'+color+'>'+money(p.amount)+'</td></tr>';}).join('')
+        +'</tbody></table></div>';
+    }
+    host.innerHTML='<div class=nkstrip>'
+      +'<div class="nktile"><div class=l>Исходящих</div><div class=vv>'+d.out.length+' · '+money(d.out_sum)+' ₸</div></div>'
+      +'<div class="nktile f"><div class=l>Входящих</div><div class=vv>'+d.in.length+' · '+money(d.in_sum)+' ₸</div></div>'
+      +'<div class="nktile r"><div class=l>Сальдо дня</div><div class=vv>'+((d.in_sum-d.out_sum)>=0?'+':'')+money(d.in_sum-d.out_sum)+' ₸</div></div></div>'
+      +'<h4 style="color:#c2410c">↑ Исходящие ('+d.out.length+')</h4>'+tbl(d.out,'#b91c1c')
+      +'<h4 style="color:#0e7490">↓ Входящие ('+d.in.length+')</h4>'+tbl(d.in,'#0e7490');
+    host.querySelectorAll('tr[data-num]').forEach(function(tr){tr.onclick=function(){openZayavka(tr.getAttribute('data-num'));};});
+  }).catch(function(e){var h=document.getElementById('dayb');if(h)h.innerHTML='<div class=err>ошибка: '+e+'</div>';});
+}
 function lineChart(host,data){
   if(!data||!data.length){host.innerHTML='<div class=note>нет данных за период</div>';return;}
   var svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('class','lchart');host.appendChild(svg);
@@ -1167,6 +1202,12 @@ function lineChart(host,data){
     tip.style.display='block';tip.style.left=Math.min(window.innerWidth-240,e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';
   });
   ov.addEventListener('mouseleave',function(){xl.style.display='none';dO.style.display='none';dI.style.display='none';dS.style.display='none';tip.style.display='none';});
+  ov.style.cursor='pointer';
+  ov.addEventListener('click',function(e){
+    var rc=svg.getBoundingClientRect(),px=(e.clientX-rc.left)*(W/rc.width);
+    var i=Math.max(0,Math.min(data.length-1,Math.round((px-padL)/(iw||1)*(data.length-1))));
+    if(data[i])openDay(data[i].d);
+  });
 }
 
 function rObzor(v){
@@ -1190,7 +1231,7 @@ function rObzor(v){
     body.appendChild(kp);
     body.appendChild(h2('Движение денег по дням (отток / приток)'));
     var ch=card('');var host=el('div','chartwrap');ch.appendChild(host);
-    ch.appendChild(el('div','clg','<span class=k><span class=sw style="background:#ea580c"></span>отток</span><span class=k><span class=sw style="background:#0891b2"></span>приток</span><span class=k><span class=sw style="background:#6d28d9"></span>сальдо (день)</span><span style=color:#94a3b8>наведи курсор — суммы и крупные платежи дня</span>'));
+    ch.appendChild(el('div','clg','<span class=k><span class=sw style="background:#ea580c"></span>отток</span><span class=k><span class=sw style="background:#0891b2"></span>приток</span><span class=k><span class=sw style="background:#6d28d9"></span>сальдо (день)</span><span style=color:#94a3b8>наведи — суммы дня · <b style=color:#0ea5e9>клик — все платежи за сутки</b></span>'));
     body.appendChild(ch);lineChart(host,fs);
     body.appendChild(h2('Сведение с Bitrix'));
     var sv=el('div','svet wide');
@@ -1701,6 +1742,12 @@ class H(http.server.BaseHTTPRequestHandler):
                     self._send('{"error":"нет № заявки"}', "application/json", 400)
                 else:
                     self._send(json.dumps(zayavka_card(num), ensure_ascii=False), "application/json")
+            except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
+        elif self.path.startswith("/day.json"):
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                dt = (q.get("date", [""])[0]).strip()
+                self._send(json.dumps(day_payments(dt), ensure_ascii=False), "application/json")
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path == "/queue.json":
             try: self._send(json.dumps(queue_stats(), ensure_ascii=False), "application/json")
