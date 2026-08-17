@@ -859,6 +859,31 @@ def day_payments(date):
             "out_sum": sum(r["amount"] for r in out), "in_sum": sum(r["amount"] for r in inc)}
 
 
+def adata_check(binf, refresh=False):
+    """Карточка проверки контрагента (модули благонадёжности Adata) с кэшем в adata_sb по БИН."""
+    if not binf:
+        return {"error": "нет БИН — сначала прочитай договор"}
+    c = _db()
+    c.execute("CREATE TABLE IF NOT EXISTS adata_sb(bin TEXT PRIMARY KEY, json TEXT, ts TEXT)")
+    r = None if refresh else c.execute("SELECT json,ts FROM adata_sb WHERE bin=?", (str(binf),)).fetchone()
+    c.close()
+    if r and r[0]:
+        try:
+            card = json.loads(r[0]); card["cached"] = r[1]; return card
+        except Exception:
+            pass
+    try:
+        import adata as A
+        card = A.sb_card(binf)
+    except Exception as e:
+        return {"error": str(e)[:200]}
+    c = _db()
+    c.execute("INSERT OR REPLACE INTO adata_sb VALUES(?,?,?)",
+              (str(binf), json.dumps(card, ensure_ascii=False), datetime.now().strftime("%Y-%m-%d %H:%M")))
+    c.commit(); c.close()
+    return card
+
+
 # ---------- дашборд ----------
 CSS = """
 *{box-sizing:border-box}body{margin:0;background:#eef2f7;color:#1e293b;font:14px -apple-system,Segoe UI,Roboto,Arial}
@@ -1069,16 +1094,33 @@ function openNkCard(x, amap, portal, ent){
   var pr=(x.payments||[]).slice().sort(function(a,b){return (a.date||'').localeCompare(b.date||'');})
     .map(function(p){return '<tr><td>'+esc(p.date||'')+'</td><td>'+esc(p.object||'—')+'</td><td>'+esc(p.account||'—')+'</td><td>'+esc((p.purpose||'').slice(0,60))+'</td><td class=num>'+money(p.amount)+'</td></tr>';}).join('')
     || '<tr><td colspan=5 style=color:#94a3b8>нет оплат 1С по этой заявке</td></tr>';
-  var cl=(ad.checklist||[]).map(function(i){return '<tr><td>'+i.n+'. '+esc(i.name)+' <span style=color:#94a3b8>· '+esc(i.dep)+'</span></td><td>'+esc(i.status)+'</td></tr>';}).join('');
   var html='<div class=nkhd><div class=t>'+esc(x.supplier||ad.short||'—')+'</div>'
     +'<div class=s>БИН '+esc(x.bin||'—')+(ad.iin?(' · ИИН '+esc(ad.iin)):'')+(ad.director?(' · '+esc(ad.director)):'')+(ad.oked?(' · '+esc(ad.oked)):'')+'</div></div>'
     +'<div class=nkstrip>'+strip+'</div>'
     +'<div class=nksec><b>Заявка №'+esc(x.num)+' · Договор '+esc(x.contract_no||'—')+'</b> '+esc(x.date||'')+' · '+esc(x.object||'')+(x.ochered?(' · '+esc(x.ochered)):'')+' &nbsp; '+bxlink
     +(x.notes?('<div class=nknote>📄 '+esc(x.notes)+'</div>'):'')+'</div>'
     +'<h4>Оплаты 1С по заявке</h4><div class=tblscroll style="max-height:30vh"><table><thead><tr><th>Дата</th><th>Объект</th><th>Счёт</th><th>Назначение</th><th class=num>Сумма</th></tr></thead><tbody>'+pr+'</tbody></table></div>'
-    +(cl?('<h4>Проверка контрагента (Adata)</h4><div class=tblscroll style="max-height:34vh"><table><tbody>'+cl+'</tbody></table></div>'):'<div class=note>Adata по этому БИН ещё не подгружена.</div>');
+    +'<h4>Проверка контрагента (Adata)</h4>'
+    +'<button class=adchk style="padding:8px 16px;border:0;border-radius:8px;background:#0ea5e9;color:#fff;font-weight:600;cursor:pointer">🛡️ Проверить контрагента</button>'
+    +'<div class=note style="margin-top:6px">Проверим по БИН: аресты счетов/имущества, фиктивные сделки, налоговую задолженность, судебные дела, розыск/терроризм по руководителю, лицензии, режим налогообложения, санкционные списки.</div>'
+    +'<div id=adatares style="margin-top:8px"></div>';
   html+='<h4>💬 Комментарии сотрудников (Bitrix)</h4><div id=nkcomments class=note>загрузка…</div>';
   openModal(html);
+  var achk=document.querySelector('.adchk');
+  if(achk)achk.onclick=function(){
+    var host=document.getElementById('adatares');
+    if(!x.bin){host.innerHTML='<div class=err>Нет БИН — сначала прочитай договор заявки</div>';return;}
+    achk.disabled=true;achk.textContent='Проверяю… (несколько секунд)';
+    fetch('adata-check?bin='+encodeURIComponent(x.bin),{cache:'no-store'}).then(function(r){return r.json();}).then(function(c){
+      achk.disabled=false;achk.textContent='🛡️ Обновить проверку';
+      if(c.error){host.innerHTML='<div class=err>'+esc(c.error)+'</div>';return;}
+      var flags=c.flags||[],bad=flags.filter(function(f){return f.bad;});
+      var head='<div class=note>Лицензий: '+(c.licenses||'—')+' · Режим налогов: '+esc(c.tax_mode||'—')+' · Суды гр/уг/адм: '+((c.courts||{}).civil||0)+'/'+((c.courts||{}).criminal||0)+'/'+((c.courts||{}).admin||0)+(c.cached?(' · кэш '+esc(c.cached)):'')+'</div>';
+      var verd=bad.length?('<div style="color:#b91c1c;font-weight:700;margin:6px 0">🔴 Красных флагов: '+bad.length+'</div>'):'<div style="color:#15803d;font-weight:700;margin:6px 0">🟢 Красных флагов нет</div>';
+      var rows=flags.map(function(f){return '<div style="padding:4px 0;border-bottom:1px solid #eef2f7;color:'+(f.bad?'#b91c1c':'#15803d')+'">'+(f.bad?'🔴':'🟢')+' '+esc(f.name)+(f.extra?(' · '+esc(f.extra)):'')+'</div>';}).join('');
+      host.innerHTML=head+verd+rows;
+    }).catch(function(e){achk.disabled=false;achk.textContent='🛡️ Проверить контрагента';host.innerHTML='<div class=err>ошибка: '+e+'</div>';});
+  };
   if(x.id){
     fetch('nk-comments?id='+encodeURIComponent(x.id)+'&num='+encodeURIComponent(x.num||''),{cache:'no-store'})
       .then(function(r){return r.json();}).then(function(d){
@@ -1748,6 +1790,13 @@ class H(http.server.BaseHTTPRequestHandler):
                 q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 dt = (q.get("date", [""])[0]).strip()
                 self._send(json.dumps(day_payments(dt), ensure_ascii=False), "application/json")
+            except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
+        elif self.path.startswith("/adata-check"):
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                binf = (q.get("bin", [""])[0]).strip()
+                refresh = (q.get("refresh", ["0"])[0]) == "1"
+                self._send(json.dumps(adata_check(binf, refresh), ensure_ascii=False), "application/json")
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path == "/queue.json":
             try: self._send(json.dumps(queue_stats(), ensure_ascii=False), "application/json")
