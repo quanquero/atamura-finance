@@ -884,6 +884,57 @@ def adata_check(binf, refresh=False):
     return card
 
 
+def bdds_article(obj_target, canon_target):
+    """Заявки/платежи, попавшие в объект×вид-работ (для провала из БДДС): № · поставщик · оплачено ·
+    договор · выполнено · есть ли накопитель. Та же атрибуция, что в bdds_data."""
+    c = _db()
+    zrows = c.execute("SELECT number,title,bx_object,supplier,id FROM zayavka").fetchall()
+    nkrows = c.execute("SELECT num,object,notes,title,article,total,vypolneno FROM nakopitel").fetchall()
+    pays = c.execute("SELECT amount,purpose FROM flow WHERE kind='out' AND supplier=1").fetchall()
+    bx_portal = dict(c.execute("SELECT k,v FROM meta").fetchall()).get("bx_portal", "")
+    c.close()
+    z_obj, z_canon, z_title, z_sup, z_id = {}, {}, {}, {}, {}
+    for number, title, bxo, supplier, iid in zrows:
+        n = str(number or "").strip() or _num_from(title or "")
+        if not n:
+            continue
+        z_obj[n] = _object_from(bxo or "") or _object_from(title or "") or (bxo or "").strip() or ""
+        z_canon[n] = _canon_article(title or "")
+        z_title[n] = title or ""; z_sup[n] = supplier or ""; z_id[n] = iid
+    nk_by_num = {}
+    for num, obj, notes, title, article, total, vyp in nkrows:
+        n = str(num)
+        canon = _canon_article(article) if article else (z_canon.get(n) or _canon_article((notes or "") + " " + (title or "")))
+        o = _object_from(obj) or z_obj.get(n) or _object_from(title or "") or "—"
+        nk_by_num[n] = {"object": o, "canon": canon, "total": total or 0, "vyp": vyp or 0}
+
+    def attr(purpose):
+        n = _num_from(purpose)
+        info = nk_by_num.get(n)
+        if info:
+            return info["object"] or "—", info["canon"], n
+        return (z_obj.get(n) or _object_from(purpose) or "—"), (z_canon.get(n) or _canon_article(purpose)), n
+
+    grp = {}
+    for amt, purpose in pays:
+        o, cn, n = attr(purpose)
+        if n and o == obj_target and cn == canon_target:
+            grp.setdefault(n, 0.0)
+            grp[n] += amt or 0
+    for n, info in nk_by_num.items():                       # накопители того же объекта×статьи (даже без оплаты)
+        if info["object"] == obj_target and info["canon"] == canon_target:
+            grp.setdefault(n, 0.0)
+    rows = []
+    for n, paid in grp.items():
+        nk = nk_by_num.get(n)
+        rows.append({"num": n, "paid": paid, "supplier": z_sup.get(n, ""),
+                     "title": (z_title.get(n, "") or "")[:100], "id": z_id.get(n),
+                     "has_nk": bool(nk), "contracted": (nk or {}).get("total", 0),
+                     "vypolneno": (nk or {}).get("vyp", 0)})
+    rows.sort(key=lambda x: -x["paid"])
+    return {"object": obj_target, "article": canon_target, "bx_portal": bx_portal, "bx_entity": 178, "rows": rows}
+
+
 # ---------- дашборд ----------
 CSS = """
 *{box-sizing:border-box}body{margin:0;background:#eef2f7;color:#1e293b;font:14px -apple-system,Segoe UI,Roboto,Arial}
@@ -1116,9 +1167,16 @@ function openNkCard(x, amap, portal, ent){
       if(c.error){host.innerHTML='<div class=err>'+esc(c.error)+'</div>';return;}
       var flags=c.flags||[],bad=flags.filter(function(f){return f.bad;});
       var head='<div class=note>Лицензий: '+(c.licenses||'—')+' · Режим налогов: '+esc(c.tax_mode||'—')+' · Суды гр/уг/адм: '+((c.courts||{}).civil||0)+'/'+((c.courts||{}).criminal||0)+'/'+((c.courts||{}).admin||0)+(c.cached?(' · кэш '+esc(c.cached)):'')+'</div>';
-      var verd=bad.length?('<div style="color:#b91c1c;font-weight:700;margin:6px 0">🔴 Красных флагов: '+bad.length+'</div>'):'<div style="color:#15803d;font-weight:700;margin:6px 0">🟢 Красных флагов нет</div>';
-      var rows=flags.map(function(f){return '<div style="padding:4px 0;border-bottom:1px solid #eef2f7;color:'+(f.bad?'#b91c1c':'#15803d')+'">'+(f.bad?'🔴':'🟢')+' '+esc(f.name)+(f.extra?(' · '+esc(f.extra)):'')+'</div>';}).join('');
-      host.innerHTML=head+verd+rows;
+      var verd=bad.length?('<div style="color:#b91c1c;font-weight:700;margin:6px 0">⚠ Найдено проблем: '+bad.length+' — проверить перед оплатой</div>'):'<div style="color:#15803d;font-weight:700;margin:6px 0">✓ Проблем не найдено — контрагент чист по всем спискам</div>';
+      var legend='<div class=note style="margin:2px 0 8px">Каждая строка — проверка по реестру. <b style="color:#15803d">«чисто»</b> = контрагента НЕТ в этом списке (хорошо). <b style="color:#b91c1c">«ЕСТЬ»</b> = найден в списке (риск).</div>';
+      // сначала проблемы, потом чистые
+      var ordered=flags.slice().sort(function(a,b){return (b.bad?1:0)-(a.bad?1:0);});
+      var rows=ordered.map(function(f){
+        var st=f.bad?('<b style="color:#b91c1c">⚠ ЕСТЬ'+(f.extra?(' · '+esc(f.extra)):'')+'</b>'):'<span style="color:#15803d">чисто</span>';
+        return '<div style="display:flex;justify-content:space-between;gap:14px;padding:5px 0;border-bottom:1px solid #eef2f7">'
+          +'<span>'+(f.bad?'🔴':'🟢')+' '+esc(f.name)+'</span><span style="white-space:nowrap">'+st+'</span></div>';
+      }).join('');
+      host.innerHTML=head+verd+legend+rows;
     }).catch(function(e){achk.disabled=false;achk.textContent='🛡️ Проверить контрагента';host.innerHTML='<div class=err>ошибка: '+e+'</div>';});
   };
   if(x.id){
@@ -1480,10 +1538,35 @@ function openObjectBdds(o){
     +donutSVG(top,col)+'<div style="flex:1;min-width:260px">'+legend(top,col)+'</div></div>';}
   else h+='<div class=note>Пока нет разложения по статьям — прочитай договоры/тех.требования по заявкам этого объекта.</div>';
   arts.sort(function(a,b){return (b.oplacheno||b.budget||0)-(a.oplacheno||a.budget||0);});
-  h+='<h4>Статьи</h4><div class=tblscroll style="max-height:34vh"><table><thead><tr><th>Статья</th><th class=num>Бюджет</th><th class=num>Договоры</th><th class=num>Оплачено</th><th class=num>Выполнено</th><th class=num>Остаток</th></tr></thead><tbody>'
-    +arts.map(function(a){return '<tr><td>'+esc(a.article)+'</td><td class=num>'+(a.budget?money(a.budget):'—')+'</td><td class=num>'+money(a.contracted)+'</td><td class=num style=color:#0e7490>'+money(a.oplacheno)+'</td><td class=num style=color:#7c3aed>'+(a.vypolneno?money(a.vypolneno):'—')+'</td><td class=num style=color:#b91c1c>'+money(a.ostatok)+'</td></tr>';}).join('')
+  h+='<h4>Статьи <span style="font-weight:400;color:#94a3b8;font-size:12px">— клик по строке: заявки, накопитель, Bitrix</span></h4><div class=tblscroll style="max-height:34vh"><table><thead><tr><th>Статья</th><th class=num>Бюджет</th><th class=num>Договоры</th><th class=num>Оплачено</th><th class=num>Выполнено</th><th class=num>Остаток</th></tr></thead><tbody>'
+    +arts.map(function(a){return '<tr class=bdartrow data-art="'+esc(a.article)+'" style="cursor:pointer"><td>'+esc(a.article)+' <span style="color:#0ea5e9;font-size:11px">→</span></td><td class=num>'+(a.budget?money(a.budget):'—')+'</td><td class=num>'+money(a.contracted)+'</td><td class=num style=color:#0e7490>'+money(a.oplacheno)+'</td><td class=num style=color:#7c3aed>'+(a.vypolneno?money(a.vypolneno):'—')+'</td><td class=num style=color:#b91c1c>'+money(a.ostatok)+'</td></tr>';}).join('')
     +'</tbody></table></div>';
   openModal(h);
+  document.querySelectorAll('.bdartrow').forEach(function(tr){tr.onclick=function(){openArticleDrill(o.object,tr.getAttribute('data-art'));};});
+}
+function openArticleDrill(object,article){
+  openModal('<div class=nkhd><div class=t>'+esc(object)+' · '+esc(article)+'</div><div class=s>заявки и платежи по этому виду работ</div></div><div id=adrill class=note>загрузка…</div>');
+  fetch('bdds-article?object='+encodeURIComponent(object)+'&article='+encodeURIComponent(article),{cache:'no-store'})
+    .then(function(r){return r.json();}).then(function(d){
+    var host=document.getElementById('adrill');if(!host)return;host.className='';
+    var rows=d.rows||[];
+    if(!rows.length){host.innerHTML='<div class=note>Нет заявок по этому виду работ.</div>';return;}
+    var tot=rows.reduce(function(s,x){return s+x.paid;},0);
+    var portal=d.bx_portal||'',ent=d.bx_entity||178;
+    host.innerHTML='<div class=note>Заявок: '+rows.length+' · оплачено суммарно '+money(tot)+' ₸. Клик по № — карточка/накопитель.</div>'
+      +'<div class=tblscroll style="max-height:46vh"><table><thead><tr><th>№</th><th>Поставщик</th><th class=num>Оплачено</th><th class=num>Договор</th><th class=num>Выполнено</th><th>Накопитель</th><th>Bitrix</th></tr></thead><tbody>'
+      +rows.map(function(x){
+        var bx=(portal&&x.id)?('<a href="'+portal+'/crm/type/'+ent+'/details/'+x.id+'/" target=_blank style=color:#0ea5e9 onclick="event.stopPropagation()">открыть →</a>'):'—';
+        return '<tr class=adrow data-num="'+esc(x.num)+'" style="cursor:pointer">'
+          +'<td><b style=color:#0ea5e9>'+esc(x.num)+'</b></td><td>'+esc((x.supplier||'—')).slice(0,28)+'</td>'
+          +'<td class=num style=color:#0e7490>'+money(x.paid)+'</td>'
+          +'<td class=num>'+(x.contracted?money(x.contracted):'—')+'</td>'
+          +'<td class=num style=color:#7c3aed>'+(x.vypolneno?money(x.vypolneno):'—')+'</td>'
+          +'<td>'+(x.has_nk?'<span style=color:#15803d>✓ есть</span>':'<span style=color:#b45309>— создать</span>')+'</td>'
+          +'<td>'+bx+'</td></tr>';
+      }).join('')+'</tbody></table></div>';
+    host.querySelectorAll('.adrow').forEach(function(tr){tr.onclick=function(){openZayavka(tr.getAttribute('data-num'));};});
+  }).catch(function(e){var h=document.getElementById('adrill');if(h)h.innerHTML='<div class=err>ошибка: '+e+'</div>';});
 }
 function rBdds(v){
   v.appendChild(h2('БДДС по объектам'));
@@ -1797,6 +1880,13 @@ class H(http.server.BaseHTTPRequestHandler):
                 binf = (q.get("bin", [""])[0]).strip()
                 refresh = (q.get("refresh", ["0"])[0]) == "1"
                 self._send(json.dumps(adata_check(binf, refresh), ensure_ascii=False), "application/json")
+            except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
+        elif self.path.startswith("/bdds-article"):
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                obj = (q.get("object", [""])[0]).strip()
+                art = (q.get("article", [""])[0]).strip()
+                self._send(json.dumps(bdds_article(obj, art), ensure_ascii=False), "application/json")
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path == "/queue.json":
             try: self._send(json.dumps(queue_stats(), ensure_ascii=False), "application/json")
