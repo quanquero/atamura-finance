@@ -839,6 +839,71 @@ def _run_process_job(jid, n):
         _job(jid, "error", str(e)[:200], done=True)
 
 
+def oplata_stats():
+    """Заявки в стадии «Оплата» (воронка 178) — для вкладки проверки Шерлок+Баффет."""
+    import precheck as PC
+    stages = {sid: "" for sid in PC.PAY_STAGE_IDS} if PC.PAY_STAGE_IDS else PC.pay_stage_ids()
+    if not stages:
+        return {"error": "стадии «Оплата» не найдены (PAY_STAGE_NAMES/PAY_STAGE_IDS)", "count": 0, "top": []}
+    items = PC.items_in_stages(list(stages.keys()))
+    rows = [{"num": it["num"], "supplier": it["supplier"], "amount": it["amount"]}
+            for it in items if it["num"]]
+    rows.sort(key=lambda x: -(x["amount"] or 0))
+    return {"count": len(items), "sum": sum(it["amount"] or 0 for it in items),
+            "stages": list(stages.keys()), "top": rows[:200]}
+
+
+def _run_precheck_job(jid, post, limit, read):
+    """Шерлок+Баффет по заявкам «Оплаты»: считает вердикт, при post=True публикует комментарий в Bitrix."""
+    import precheck as PC
+    import hashlib
+    try:
+        PC._ensure_table()
+        stages = {sid: "" for sid in PC.PAY_STAGE_IDS} if PC.PAY_STAGE_IDS else PC.pay_stage_ids()
+        items = [it for it in PC.items_in_stages(list(stages.keys())) if it["num"]]
+        items.sort(key=lambda it: -(it["amount"] or 0))
+        total = min(len(items), limit)
+        pays = PC._pays()
+        done = []
+        for it in items[:limit]:
+            _job(jid, "read", f"[{len(done)+1}/{total}] №{it['num']} · {(it['supplier'] or '')[:24]}"
+                 + (" · читаю договор…" if read else ""),
+                 result={"i": len(done), "total": total, "done": done})
+            try:
+                v = PC.verdict(it, pays, read=read)
+                text = PC.comment_text(v)
+            except Exception as e:
+                done.append({"num": it["num"], "supplier": it["supplier"], "amount": it["amount"],
+                             "level": "warn", "sherlock": [], "remarks": ["ошибка: " + str(e)[:120]],
+                             "text": "", "posted": "", "id": it["id"]})
+                continue
+            posted = ""
+            if post:
+                h = hashlib.md5(text.encode("utf-8")).hexdigest()[:16]
+                ph, pcid = PC._posted(v["num"])
+                if ph == h:
+                    posted = "не изменился"
+                else:
+                    try:
+                        if pcid:
+                            PC.update_comment(pcid, text); cid, posted = pcid, "обновлён"
+                        else:
+                            cid, posted = PC.post_comment(it["id"], text), "запостен"
+                        PC._mark_posted(v["num"], h, cid)
+                    except Exception as e:
+                        posted = "ошибка: " + str(e)[:80]
+            done.append({"num": v["num"], "supplier": v["supplier"], "amount": v["amount"],
+                         "level": v.get("level", "warn"), "sherlock": v["sherlock"],
+                         "remarks": v["remarks"], "buffett": v.get("buffett", {}),
+                         "text": text, "posted": posted, "id": it["id"]})
+            _job(jid, "read", f"[{len(done)}/{total}] №{it['num']}", result={"i": len(done), "total": total, "done": done})
+        reds = sum(1 for d in done if d["level"] == "red")
+        _job(jid, "done", f"Готово: {len(done)} заявок · 🔴 {reds}" + (" · опубликовано в Bitrix" if post else " · без записи"),
+             done=True, result={"i": total, "total": total, "done": done})
+    except Exception as e:
+        _job(jid, "error", str(e)[:200], done=True)
+
+
 def money(n):
     return f"{n:,.0f}".replace(",", " ")
 
@@ -1068,7 +1133,7 @@ function money(n){return (Math.round(n||0)).toLocaleString('ru-RU').replace(/,/g
 function el(t,c,h){var e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;}
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');}
 var D=null, tab='obzor';
-var TABS=[['obzor','Обзор'],['pay','Платежи 1С'],['sved','Сведение'],['nk','Накопитель'],['bdds','БДДС'],['proc','Обработка'],['ctrl','Контроль']];
+var TABS=[['obzor','Обзор'],['pay','Платежи 1С'],['sved','Сведение'],['nk','Накопитель'],['bdds','БДДС'],['proc','Обработка'],['oplata','Оплата'],['ctrl','Контроль']];
 
 fetch('data.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){D=d;boot();})
   .catch(function(e){app.className='';app.innerHTML='<div class=wrap><div class=err>Ошибка загрузки данных: '+e+'</div></div>';});
@@ -1094,7 +1159,7 @@ function boot(){
     +'<span style="color:#64748b">· индекс '+esc(m.idx_ts||'—')+'</span>';
   app.appendChild(foot);
 }
-function render(){var v=document.getElementById('view');v.innerHTML='';({obzor:rObzor,pay:rPay,sved:rSved,nk:rNk,bdds:rBdds,proc:rProcess,ctrl:rCtrl}[tab])(v);}
+function render(){var v=document.getElementById('view');v.innerHTML='';({obzor:rObzor,pay:rPay,sved:rSved,nk:rNk,bdds:rBdds,proc:rProcess,oplata:rOplata,ctrl:rCtrl}[tab])(v);}
 
 function card(inner){var c=el('div','card');if(typeof inner=='string')c.innerHTML=inner;else c.appendChild(inner);return c;}
 function h2(t){return el('h2',null,t);}
@@ -1669,6 +1734,75 @@ function rProcess(v){
   }
   load();
 }
+function rOplata(v){
+  v.appendChild(h2('Проверка перед оплатой — Шерлок + Баффет'));
+  v.appendChild(el('div','note','Заявки в стадии «Оплата» воронки 178. «Проверить» считает вердикт (дубли/переплата/контрагент) без записи; «Опубликовать» пишет ОДИН комментарий в карточку Bitrix (идемпотентно по хэшу). Временный инструмент.'));
+  var host=el('div');host.innerHTML='<div class=note>Загрузка…</div>';v.appendChild(host);
+  function lvlPill(l){return l==='red'?'<span style="color:#b91c1c;font-weight:700">⛔ СТОП</span>':(l==='warn'?'<span style="color:#b45309;font-weight:700">⚠ замечания</span>':'<span style="color:#15803d;font-weight:700">✅ можно</span>');}
+  function renderRes(hostEl,done){
+    hostEl.innerHTML='<div class=card><div style="padding:8px 12px;font-size:12px;color:#64748b;background:#f8fafc">Результаты ('+done.length+') — клик по строке: полный текст комментария</div>'
+      +'<div class=tblscroll><table><thead><tr><th>Итог</th><th>№</th><th>Поставщик</th><th class=num>Сумма</th><th>Шерлок / замечания</th><th>Bitrix</th></tr></thead><tbody>'
+      +done.map(function(x,i){
+        var sh=(x.sherlock&&x.sherlock.length)?esc(x.sherlock[0].slice(0,50)):'—';
+        var rm=(x.remarks&&x.remarks.length)?(' · замечаний '+x.remarks.length):'';
+        return '<tr class=ocard data-i="'+i+'" style="cursor:pointer"><td>'+lvlPill(x.level)+'</td>'
+          +'<td><b style=color:#0ea5e9>'+esc(x.num)+'</b></td><td>'+esc((x.supplier||'—')).slice(0,26)+'</td>'
+          +'<td class=num>'+money(x.amount)+'</td><td style="font-size:12px;color:#475569">'+sh+rm+'</td>'
+          +'<td>'+(x.posted?('<span style=color:#0e7490>'+esc(x.posted)+'</span>'):'—')+'</td></tr>'
+          +'<tr class="ofull o'+i+'" style="display:none"><td colspan=6 style="background:#f8fafc"><pre style="white-space:pre-wrap;font-size:12px;margin:0;padding:8px 10px;font-family:inherit">'+esc(x.text||'(нет текста)')+'</pre></td></tr>';
+      }).join('')+'</tbody></table></div></div>';
+    hostEl.querySelectorAll('tr.ocard').forEach(function(tr){tr.onclick=function(){
+      var i=tr.getAttribute('data-i'),f=hostEl.querySelector('tr.o'+i);if(f)f.style.display=(f.style.display==='none'?'':'none');
+    };});
+  }
+  function load(){
+    host.innerHTML='<div class=note>Загрузка…</div>';
+    fetch('oplata.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+      host.innerHTML='';
+      if(d.error){host.innerHTML='<div class=err>'+esc(d.error)+'</div>';return;}
+      var strip=el('div','svet wide');
+      function tl(cls,val,lbl){return '<div class="sv '+cls+'"><div class=n style="font-size:20px">'+val+'</div><div class=l>'+lbl+'</div></div>';}
+      strip.innerHTML=tl('y',d.count,'Заявок в стадии «Оплата»')+tl('r',money(d.sum)+' ₸','Сумма к оплате');
+      host.appendChild(strip);
+      var pf=el('div');pf.style.cssText='display:flex;gap:8px;align-items:center;margin:14px 0;flex-wrap:wrap';
+      pf.innerHTML='<span style="color:#475569;font-size:13px">Заявок:</span>'
+        +'<input class=pn type=number value=10 min=1 max=60 style="width:74px;padding:7px 10px;border:1px solid #cbd5e1;border-radius:8px">'
+        +'<label style="font-size:13px;color:#475569;display:flex;align-items:center;gap:5px"><input type=checkbox class=prd> дочитывать договоры (медленнее, точнее)</label>'
+        +'<button class=pchk style="padding:8px 16px;border:0;border-radius:8px;background:#0ea5e9;color:#fff;font-weight:600;cursor:pointer">Проверить (без записи)</button>'
+        +'<button class=ppost style="padding:8px 16px;border:0;border-radius:8px;background:#b45309;color:#fff;font-weight:600;cursor:pointer">Опубликовать в Bitrix</button>'
+        +'<span class=pmsg style="color:#64748b;font-size:12px"></span>';
+      host.appendChild(pf);
+      var prog=el('div');prog.style.marginBottom='12px';host.appendChild(prog);
+      var resHost=el('div');host.appendChild(resHost);
+      var top=d.top||[];
+      var qc=el('div','card');
+      qc.innerHTML='<div style="padding:8px 12px;font-size:12px;color:#64748b;background:#f8fafc">Очередь стадии «Оплата» (топ '+top.length+' по сумме)</div>'
+        +'<div class=tblscroll><table><thead><tr><th>№</th><th>Поставщик</th><th class=num>Сумма</th></tr></thead><tbody>'
+        +top.map(function(x){return '<tr><td>'+esc(x.num)+'</td><td>'+esc((x.supplier||'—')).slice(0,40)+'</td><td class=num>'+money(x.amount)+'</td></tr>';}).join('')+'</tbody></table></div>';
+      host.appendChild(qc);
+      var pn=pf.querySelector('.pn'),prd=pf.querySelector('.prd'),pchk=pf.querySelector('.pchk'),ppost=pf.querySelector('.ppost'),pmsg=pf.querySelector('.pmsg');
+      function run(post){
+        var n=Math.max(1,Math.min(60,parseInt(pn.value)||10)),read=prd.checked?1:0;
+        if(post&&!confirm('Опубликовать вердикты в '+n+' карточках Bitrix? (идемпотентно — повтор не плодит дубли)'))return;
+        pchk.disabled=ppost.disabled=true;pmsg.textContent='запускаю…';
+        fetch('precheck-run?post='+(post?1:0)+'&read='+read+'&n='+n,{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
+          if(j.error||!j.job){pchk.disabled=ppost.disabled=false;pmsg.textContent='ошибка: '+(j.error||'нет задачи');return;}
+          var poll=setInterval(function(){
+            fetch('nk-status?id='+encodeURIComponent(j.job),{cache:'no-store'}).then(function(r){return r.json();}).then(function(s){
+              var rr=s.result||{},i=rr.i||0,total=rr.total||n,pct=total?Math.round(i/total*100):0;
+              prog.innerHTML='<div style="font-size:13px;color:#334155;margin-bottom:4px">'+esc(s.msg||'')+'</div><div class=track style="height:12px"><div class="fill fi" style="width:'+pct+'%;background:#0ea5e9"></div></div>';
+              var done=rr.done||[];if(done.length)renderRes(resHost,done);
+              if(s.done){clearInterval(poll);pchk.disabled=ppost.disabled=false;pmsg.textContent=s.msg||'готово';}
+            }).catch(function(e){clearInterval(poll);pchk.disabled=ppost.disabled=false;pmsg.textContent='ошибка опроса';});
+          },1200);
+        }).catch(function(e){pchk.disabled=ppost.disabled=false;pmsg.textContent='ошибка запуска';});
+      }
+      pchk.onclick=function(){run(false);};
+      ppost.onclick=function(){run(true);};
+    }).catch(function(e){host.innerHTML='<div class=err>Ошибка: '+e+'</div>';});
+  }
+  load();
+}
 function rCtrl(v){
   var g={};D.payments.forEach(function(p){if(!p.bin)return;var k=p.company+'|'+p.bin+'|'+Math.round(p.amount)+'|'+p.date;(g[k]=g[k]||[]).push(p);});
   var dub=Object.keys(g).map(function(k){return g[k];}).filter(function(a){return a.length>1;}).map(function(a){return {company:a[0].company,name:a[0].name,bin:a[0].bin,amount:a[0].amount,date:a[0].date,n:a.length};});
@@ -1890,6 +2024,19 @@ class H(http.server.BaseHTTPRequestHandler):
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path == "/queue.json":
             try: self._send(json.dumps(queue_stats(), ensure_ascii=False), "application/json")
+            except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
+        elif self.path == "/oplata.json":
+            try: self._send(json.dumps(oplata_stats(), ensure_ascii=False), "application/json")
+            except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
+        elif self.path.startswith("/precheck-run"):
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                post = (q.get("post", ["0"])[0]) == "1"
+                read = (q.get("read", ["0"])[0]) == "1"
+                n = max(1, min(60, int((q.get("n", ["10"])[0]) or 10)))
+                jid = _new_job()
+                threading.Thread(target=_run_precheck_job, args=(jid, post, n, read), daemon=True).start()
+                self._send(json.dumps({"job": jid}), "application/json")
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path.startswith("/process"):
             try:
