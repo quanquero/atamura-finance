@@ -429,6 +429,23 @@ def reconcile():
             "nz_orphan": len(pay_no_zayavka) - nz_in_reestr}
 
 
+def snapshot_data():
+    """Компактная финсводка для кокпита ATAMŪRA Core (оборот/сальдо/матч 1С)."""
+    c = _db()
+    o = c.execute("SELECT COALESCE(SUM(amount),0) FROM flow WHERE kind='out' AND supplier=1").fetchone()[0]
+    ic = c.execute("SELECT COALESCE(SUM(amount),0) FROM flow WHERE kind='in'").fetchone()[0]
+    dmin, dmax = c.execute("SELECT MIN(date),MAX(date) FROM flow").fetchone()
+    ncomp = c.execute("SELECT COUNT(DISTINCT company) FROM flow").fetchone()[0]
+    meta = dict(c.execute("SELECT k,v FROM meta").fetchall())
+    c.close()
+    r = reconcile()
+    return {"product": "Финблок", "ottok": round(o), "pritok": round(ic), "saldo": round(ic - o),
+            "matched": r["matched_n"], "reserve": len(r["reserve"]),
+            "in_progress": len(r["in_progress"]), "rejected": len(r["rejected"]),
+            "nz_orphan": r["nz_orphan"], "z_total": r["z_total"], "companies": ncomp,
+            "period": [dmin, dmax], "ts": meta.get("ts"), "months": meta.get("months")}
+
+
 def store(payload):
     """Принять срез: заменить flow, запомнить время/период. payload={flow:[...], months, ts}."""
     rows = payload.get("flow", [])
@@ -1992,6 +2009,14 @@ class H(http.server.BaseHTTPRequestHandler):
         return False
 
     def do_GET(self):
+        if self.path.startswith("/api/metrics.json"):     # снимок для кокпита ATAMŪRA Core (сервис-ключ, до входа)
+            if self.headers.get("X-Service-Key") != KEY:
+                self._send('{"error":"forbidden — нужен X-Service-Key (SERVICE_KEY)"}', "application/json", 403); return
+            try:
+                self._send(json.dumps(snapshot_data(), ensure_ascii=False), "application/json")
+            except Exception as e:
+                self._send(json.dumps({"error": str(e)[:160]}, ensure_ascii=False), "application/json", 500)
+            return
         if not self._gate():
             return
         if self.path == "/login":
