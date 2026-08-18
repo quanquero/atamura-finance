@@ -328,6 +328,7 @@ def reconcile():
     pays = c.execute("SELECT company,name,amount,date,purpose,doc,bin FROM flow WHERE kind='out' AND supplier=1").fetchall()
     zs = c.execute("SELECT id,number,company,supplier,amount,stage FROM zayavka").fetchall()
     rs = c.execute("SELECT num,name,bin FROM reestr").fetchall()
+    nk_acc = c.execute("SELECT num,account FROM nakopitel").fetchall()
     idx = dict(c.execute("SELECT num,id FROM zayavka_idx").fetchall()); c.close()
     znums_win = {z[1] for z in zs if z[1]}          # заявки в окне (для статуса)
     # для определения «сироты» — полный индекс всех заявок Bitrix, если загружен; иначе окно
@@ -354,20 +355,46 @@ def reconcile():
             return None
         return max(score.items(), key=lambda x: x[1])[0]   # (zid, num) с макс. пересечением
 
+    # 2-я нога матча: № счёта из накопителя → № заявки; суммы заявок — для матча по поставщик+сумма
+    acc_to_num = {}
+    for nnum, acc in nk_acc:
+        ad = re.sub(r"\D", "", str(acc or ""))
+        if len(ad) >= 6:
+            acc_to_num.setdefault(ad, str(nnum))
+    z_amt = {num: (amt or 0) for zid, num, comp, sup, amt, stage in zs if num}
+
+    def _match_num(purpose, amt, name):
+        """Оплата → № заявки: 1) № в назначении, 2) № счёта (накопитель), 3) поставщик+сумма."""
+        zn = _num_from(purpose)
+        if zn and zn in known_nums:
+            return zn
+        pd = re.sub(r"\D", "", purpose or "")
+        if pd:
+            for ad, nnum in acc_to_num.items():               # № счёта в назначении
+                if ad in pd:
+                    return nnum
+        if name:                                              # поставщик + близкая сумма
+            cand = _cand_by_supplier(name)
+            if cand and cand[1] and abs((z_amt.get(cand[1], 0) or 0) - (amt or 0)) < max(1.0, 0.02 * (amt or 0)):
+                return cand[1]
+        return None
+
     pay_nums, pay_no_num, pay_no_zayavka = {}, [], []
     cash_tot, cash_n, cash_matched = 0.0, 0, 0
     for company, name, amt, date, purpose, doc, pbin in pays:
         zn = _num_from(purpose)
-        if zn:
-            pay_nums.setdefault(zn, True)   # заявка «оплачена» и наличными, и с р/с
-        if "кассов" in (doc or "").lower():   # РКО — наличные, отдельный поток
+        mnum = _match_num(purpose, amt, name)        # многоключевой матч
+        if mnum:
+            pay_nums[mnum] = True
+        if "кассов" in (doc or "").lower():          # РКО — наличные, отдельный поток
             cash_tot += amt; cash_n += 1
-            if zn and zn in known_nums: cash_matched += 1
+            if mnum: cash_matched += 1
             continue
+        if mnum:
+            continue                                 # сматчено (№/счёт/поставщик+сумма) — не сирота
         if not zn:
             pay_no_num.append((company, name, amt, date))
-        elif zn not in known_nums:
-            # проверяем реестр финотдела: по № или по БИН
+        else:                                        # № есть, но заявки такой нет и иначе не сматчилось
             hit = None
             if zn in reestr_nums:
                 hit = ("№", zn, "")
