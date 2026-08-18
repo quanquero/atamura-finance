@@ -1794,7 +1794,7 @@ function rOplata(v){
       var pf=el('div');pf.style.cssText='display:flex;gap:8px;align-items:center;margin:14px 0;flex-wrap:wrap';
       pf.innerHTML='<span style="color:#475569;font-size:13px">Заявок:</span>'
         +'<input class=pn type=number value=10 min=1 max=60 style="width:74px;padding:7px 10px;border:1px solid #cbd5e1;border-radius:8px">'
-        +'<label style="font-size:13px;color:#475569;display:flex;align-items:center;gap:5px"><input type=checkbox class=prd> дочитывать договоры (медленнее, точнее)</label>'
+        +'<label style="font-size:13px;color:#475569;display:flex;align-items:center;gap:5px"><input type=checkbox class=prd checked> дочитывать документы (счёт/договор/АВР — нужно для Баффета)</label>'
         +'<button class=pchk style="padding:8px 16px;border:0;border-radius:8px;background:#0ea5e9;color:#fff;font-weight:600;cursor:pointer">Проверить (без записи)</button>'
         +'<button class=ppost style="padding:8px 16px;border:0;border-radius:8px;background:#b45309;color:#fff;font-weight:600;cursor:pointer">Опубликовать в Bitrix</button>'
         +'<span class=pmsg style="color:#64748b;font-size:12px"></span>';

@@ -257,7 +257,7 @@ def verdict(item, pays, read=True):
         elif is_works and cno and "кс-2" not in low and "кс-3" not in low and "акт" not in low:
             remarks.append("🔴 Работы: актов выполнения (АВР/КС-2/КС-3) нет — оплата авансовая, не за принятые работы")
     else:
-        remarks.append("Договор/документы не прочитаны — накопитель не построен")
+        remarks.append("Документы не прочитаны — включи «дочитывать документы», чтобы посчитать остаток/выполнение/условия")
     # --- Adata: контрагент-риски (модули благонадёжности) + лимит НДС для ИП ---
     ad = _adata(binf) if binf else {}
     bsc = ad.get("basic", {})
