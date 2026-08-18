@@ -432,15 +432,16 @@ def reconcile():
 def snapshot_data():
     """Компактная финсводка для кокпита ATAMŪRA Core (оборот/сальдо/матч 1С)."""
     c = _db()
-    o = c.execute("SELECT COALESCE(SUM(amount),0) FROM flow WHERE kind='out' AND supplier=1").fetchone()[0]
-    ic = c.execute("SELECT COALESCE(SUM(amount),0) FROM flow WHERE kind='in'").fetchone()[0]
+    o = c.execute("SELECT COALESCE(SUM(amount),0) FROM flow WHERE kind='out'").fetchone()[0]      # ВЕСЬ отток
+    ic = c.execute("SELECT COALESCE(SUM(amount),0) FROM flow WHERE kind='in'").fetchone()[0]       # ВЕСЬ приток
+    sup = c.execute("SELECT COALESCE(SUM(amount),0) FROM flow WHERE kind='out' AND supplier=1").fetchone()[0]
     dmin, dmax = c.execute("SELECT MIN(date),MAX(date) FROM flow").fetchone()
     ncomp = c.execute("SELECT COUNT(DISTINCT company) FROM flow").fetchone()[0]
     meta = dict(c.execute("SELECT k,v FROM meta").fetchall())
     c.close()
     r = reconcile()
     return {"product": "Финблок", "ottok": round(o), "pritok": round(ic), "saldo": round(ic - o),
-            "matched": r["matched_n"], "reserve": len(r["reserve"]),
+            "supplier_pay": round(sup), "matched": r["matched_n"], "reserve": len(r["reserve"]),
             "in_progress": len(r["in_progress"]), "rejected": len(r["rejected"]),
             "nz_orphan": r["nz_orphan"], "z_total": r["z_total"], "companies": ncomp,
             "period": [dmin, dmax], "ts": meta.get("ts"), "months": meta.get("months")}
