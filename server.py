@@ -969,6 +969,46 @@ def day_payments(date):
             "out_sum": sum(r["amount"] for r in out), "in_sum": sum(r["amount"] for r in inc)}
 
 
+def bases_1c():
+    """Платежи 1С В РАЗРЕЗЕ ПО БАЗАМ/дочкам (company): сколько платежей, отток/приток, контрагентов, период.
+    Показывает покрытие — какая база сколько дала (пустые базы = не догружены/нет активности)."""
+    c = _db()
+    rows = c.execute("SELECT company,kind,amount,date,bin FROM flow").fetchall()
+    c.close()
+    agg = {}
+    for company, kind, amount, date, binf in rows:
+        key = company or "—"
+        g = agg.setdefault(key, {"company": key, "n": 0, "out": 0.0, "in": 0.0, "bins": set(), "dmin": "", "dmax": ""})
+        g["n"] += 1
+        if kind == "out":
+            g["out"] += amount or 0
+        elif kind == "in":
+            g["in"] += amount or 0
+        if binf:
+            g["bins"].add(binf)
+        d = str(date or "")[:10]
+        if d:
+            g["dmin"] = d if not g["dmin"] or d < g["dmin"] else g["dmin"]
+            g["dmax"] = d if not g["dmax"] or d > g["dmax"] else g["dmax"]
+    out = [{"company": g["company"], "n": g["n"], "out": round(g["out"]), "in": round(g["in"]),
+            "contragents": len(g["bins"]), "period": [g["dmin"], g["dmax"]]} for g in agg.values()]
+    out.sort(key=lambda x: -(x["out"] + x["in"]))
+    return {"bases": out, "total": len(out)}
+
+
+def base_payments(company):
+    """Сырые платежи одной базы 1С (что вытянули): дата · тип · документ · контрагент · сумма · назначение."""
+    c = _db()
+    rows = c.execute("""SELECT kind,date,doc,number,bin,name,amount,vidop,purpose FROM flow
+                        WHERE company=? ORDER BY date DESC, amount DESC LIMIT 1500""", (str(company),)).fetchall()
+    c.close()
+    return {"company": str(company),
+            "rows": [{"kind": k, "date": d, "doc": doc, "number": num, "bin": binf, "name": name,
+                      "amount": amt or 0, "vidop": vidop, "purpose": (purpose or "")[:140],
+                      "object": _object_from(purpose or "") or "—", "znum": _num_from(purpose or "")}
+                     for k, d, doc, num, binf, name, amt, vidop, purpose in rows]}
+
+
 def adata_check(binf, refresh=False):
     """Карточка проверки контрагента (модули благонадёжности Adata) с кэшем в adata_sb по БИН."""
     if not binf:
@@ -1178,7 +1218,7 @@ function money(n){return (Math.round(n||0)).toLocaleString('ru-RU').replace(/,/g
 function el(t,c,h){var e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;}
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');}
 var D=null, tab='obzor';
-var TABS=[['obzor','Обзор'],['pay','Платежи 1С'],['sved','Сведение'],['nk','Накопитель'],['bdds','БДДС'],['proc','Обработка'],['oplata','Оплата'],['ctrl','Контроль']];
+var TABS=[['obzor','Обзор'],['pay','Платежи 1С'],['bases','Базы 1С'],['sved','Сведение'],['nk','Накопитель'],['bdds','БДДС'],['proc','Обработка'],['oplata','Оплата'],['ctrl','Контроль']];
 
 fetch('data.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){D=d;boot();})
   .catch(function(e){app.className='';app.innerHTML='<div class=wrap><div class=err>Ошибка загрузки данных: '+e+'</div></div>';});
@@ -1204,7 +1244,7 @@ function boot(){
     +'<span style="color:#64748b">· индекс '+esc(m.idx_ts||'—')+'</span>';
   app.appendChild(foot);
 }
-function render(){var v=document.getElementById('view');v.innerHTML='';({obzor:rObzor,pay:rPay,sved:rSved,nk:rNk,bdds:rBdds,proc:rProcess,oplata:rOplata,ctrl:rCtrl}[tab])(v);}
+function render(){var v=document.getElementById('view');v.innerHTML='';({obzor:rObzor,pay:rPay,bases:rBases,sved:rSved,nk:rNk,bdds:rBdds,proc:rProcess,oplata:rOplata,ctrl:rCtrl}[tab])(v);}
 
 function card(inner){var c=el('div','card');if(typeof inner=='string')c.innerHTML=inner;else c.appendChild(inner);return c;}
 function h2(t){return el('h2',null,t);}
@@ -1779,6 +1819,49 @@ function rProcess(v){
   }
   load();
 }
+function openBase(company){
+  openModal('<div class=nkhd><div class=t>База 1С · '+esc(company)+'</div><div class=s>сырые платежи, что вытянули из 1С</div></div><div id=baseb class=note>загрузка…</div>');
+  fetch('base.json?company='+encodeURIComponent(company),{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+    var host=document.getElementById('baseb');if(!host)return;host.className='';
+    var rows=d.rows||[];
+    if(!rows.length){host.innerHTML='<div class=note>Платежей по этой базе нет.</div>';return;}
+    var out=0,inc=0;rows.forEach(function(p){if(p.kind==='out')out+=p.amount;else if(p.kind==='in')inc+=p.amount;});
+    host.innerHTML='<div class=note>Платежей: '+rows.length+' · отток '+money(out)+' · приток '+money(inc)+' ₸ (макс 1500 строк)</div>'
+      +'<div class=tblscroll style="max-height:60vh"><table><thead><tr><th>Дата</th><th>Тип</th><th>Документ</th><th>Контрагент</th><th>БИН</th><th>№</th><th>Назначение</th><th class=num>Сумма</th></tr></thead><tbody>'
+      +rows.map(function(p){return '<tr><td>'+esc((p.date||'').slice(0,10))+'</td>'
+        +'<td>'+(p.kind==='out'?'<span style=color:#c2410c>↑ исх</span>':'<span style=color:#0e7490>↓ вх</span>')+'</td>'
+        +'<td style="font-size:11px;color:#64748b">'+esc((p.doc||'')+' '+(p.number||'')).slice(0,22)+'</td>'
+        +'<td>'+esc((p.name||'—')).slice(0,26)+'</td><td class=num style="font-size:11px">'+esc(p.bin||'—')+'</td>'
+        +'<td>'+(p.znum?('<b style=color:#0ea5e9>'+esc(p.znum)+'</b>'):'—')+'</td>'
+        +'<td style="font-size:11px;color:#64748b">'+esc(p.purpose||'')+'</td>'
+        +'<td class=num style=color:'+(p.kind==='out'?'#b91c1c':'#0e7490')+'>'+money(p.amount)+'</td></tr>';}).join('')
+      +'</tbody></table></div>';
+  }).catch(function(e){var h=document.getElementById('baseb');if(h)h.innerHTML='<div class=err>ошибка: '+e+'</div>';});
+}
+function rBases(v){
+  v.appendChild(h2('Платежи 1С по базам (дочкам)'));
+  v.appendChild(el('div','note','Разрез по базам 1С: сколько платежей вытянули из каждой, отток/приток, контрагентов, период. Клик по базе → сырые платежи, что оттуда прочитали. Пустые/малые базы = не догружены или без активности.'));
+  var host=el('div');host.innerHTML='<div class=note>Загрузка…</div>';v.appendChild(host);
+  fetch('bases.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+    host.innerHTML='';
+    var bs=d.bases||[];
+    if(!bs.length){host.innerHTML='<div class=cashln>Платежей нет — не залит срез 1С.</div>';return;}
+    var tN=0,tO=0,tI=0;bs.forEach(function(b){tN+=b.n;tO+=b.out;tI+=b.in;});
+    var strip=el('div','svet wide');
+    function tl(cls,val,lbl){return '<div class="sv '+cls+'"><div class=n style="font-size:17px">'+val+'</div><div class=l>'+lbl+'</div></div>';}
+    strip.innerHTML=tl('nu',bs.length,'Баз с платежами')+tl('bl',money(tN),'Платежей всего')+tl('r',money(tO)+' ₸','Отток')+tl('g',money(tI)+' ₸','Приток');
+    host.appendChild(strip);
+    var wrap=el('div','tblscroll');wrap.style.marginTop='12px';var t=el('table');
+    t.innerHTML='<thead><tr><th>База / дочка</th><th class=num>Платежей</th><th class=num>Отток</th><th class=num>Приток</th><th class=num>Контрагентов</th><th>Период</th></tr></thead><tbody>'
+      +bs.map(function(b){return '<tr class=baserow data-c="'+esc(b.company)+'" style="cursor:pointer">'
+        +'<td><b>'+esc(b.company)+'</b> <span style="color:#0ea5e9;font-size:11px">читать →</span></td>'
+        +'<td class=num>'+money(b.n)+'</td><td class=num style=color:#c2410c>'+money(b.out)+'</td>'
+        +'<td class=num style=color:#0e7490>'+money(b.in)+'</td><td class=num>'+b.contragents+'</td>'
+        +'<td style="font-size:12px;color:#64748b">'+esc((b.period[0]||'')+' → '+(b.period[1]||''))+'</td></tr>';}).join('')+'</tbody>';
+    wrap.appendChild(t);host.appendChild(wrap);
+    t.querySelectorAll('tr.baserow').forEach(function(tr){tr.onclick=function(){openBase(tr.getAttribute('data-c'));};});
+  }).catch(function(e){host.innerHTML='<div class=err>Ошибка: '+e+'</div>';});
+}
 function rOplata(v){
   v.appendChild(h2('Проверка перед оплатой — Шерлок + Баффет'));
   v.appendChild(el('div','note','Заявки в стадии «Оплата» воронки 178. «Проверить» считает вердикт (дубли/переплата/контрагент) без записи; «Опубликовать» пишет ОДИН комментарий в карточку Bitrix (идемпотентно по хэшу). Временный инструмент.'));
@@ -2080,6 +2163,15 @@ class H(http.server.BaseHTTPRequestHandler):
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path == "/oplata.json":
             try: self._send(json.dumps(oplata_stats(), ensure_ascii=False), "application/json")
+            except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
+        elif self.path == "/bases.json":
+            try: self._send(json.dumps(bases_1c(), ensure_ascii=False), "application/json")
+            except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
+        elif self.path.startswith("/base.json"):
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                comp = (q.get("company", [""])[0])
+                self._send(json.dumps(base_payments(comp), ensure_ascii=False), "application/json")
             except Exception as e: self._send(json.dumps({"error": str(e)}, ensure_ascii=False), "application/json", 500)
         elif self.path.startswith("/precheck-run"):
             try:
